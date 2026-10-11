@@ -1,0 +1,87 @@
+{
+  "version": 1,
+  "active": [
+    {
+      "id": "2026-10-11-astrbot-虚拟股市插件-设计与实现计划",
+      "title": "astrbot 虚拟股市插件 · 设计与实现计划",
+      "status": "active",
+      "acceptance": "",
+      "notes": [
+        "2026-10-11: 续作核验：团队 p2-implementation 已批准，t1 IPO 因 UND_ERR_DESTROYED 渠道错误 failed；t2 margin 正由 coder_free 运行，不重复派发。工作区非 Git 仓库。纠正历史陈述：112 个断言是 pwsh 下 service 层模拟，不是 code_verify 通过、更不证明 main.py/真实 AstrBot 可用；DESIGN.md 明确融资融券属 P3（已批准团队包含此项，保留范围）。复用本账本+现有团队为唯一续作记录。",
+        "2026-10-11: t2 融资融券（margin）完成：game/margin.py + .dsh-code/margin_check.py 73/73（pwsh 通道），compileall 通过。账本 meta 键 margin.ledger.v1。集成契约已报队长（命令接线/dayclose/config 键留待后续集成任务）。",
+        "2026-10-11: [!] marked done with no passing code_verify recorded in this session — \"done\" is a claim, not evidence. If it truly was verified, run the command again through code_verify (or record the exact command and its output) so the ledger holds the proof; otherwise do not treat this task as proven.",
+        "2026-10-11: 团队续作检查点：t1 IPO 已由失败Step5尝试改派 ipo_free（cline/cline-free/mimo-v2.6-flash）；t2融资服务由coder_free完成，自报73断言pwsh通过，未接线。新增review_free（同免费MiMo）负责t3独立审查t2及t5最终验收。t4统一集成由coder_free承担，依赖t1+t3；t5依赖t4。共享文件仅t4写，避免竞写；t4要求修复已发现Corporate缺方法/签名不一致和主循环漏竞价/日切错误，验证净资产扣负债、数据库原子性、IPO真实上市链。不部署、不清库；现时等待成员结果。模型路由为已注册cline免费模型，并非已验证Our Free Mode遥测自动轮换。",
+        "2026-10-11: t3 独立审查交付（verdict=pass 指审查完成非实现通过）：5 Critical + 6 Important，全部有可复现探针 .dsh-code/margin_probe_t3.py。C1 现金/meta 非原子→印钞+重复扣息；C2 NaN 入账负现金；C3 坏账本缺键→setdefault 销账；C4 强平绕过停牌跌停；C5 强平不撤卖单→幽灵卖单空卖增发。I1 计息漏日/I2 榜单刷榜/I3 L3L4 归属/I4 未接线+无清账/I5 config 缺键/I6 阶段标签漂移。已把修复清单+死锁警告（trade_lock 非重入）发给 coder_free，并将 t1 改派 coder_free（ipo_free 的 mimo 慢+网络失败），t4 继续。Our Free Mode 已写两条 fallback 回退链 combo:main（step5/nemotron3u/nemotron3.5l/spacebunny/ling3.1）与 combo:subagent（step5/longcat/mimo，用户要求子代理头一个换快模型），已写 settings.json 待重启生效。",
+        "2026-10-11: Our Free Mode 回退链定稿并 code_verify 通过：29 个可用模型拆两份、零重叠——combo:main 9 个（kimi-k3/deepseek-v4.1-flash/glm-5.3/kimi-k2.6/step-5-preview/glm-5.3-flash/inkling-small/nemotron-3-ultra/nemotron-3-super），combo:subagent 20 个（north-mini-code 起、编码与小模型优先，kilo-auto/openrouter/space-bunny 等兜底）。catalog 共 34，排除 5 个探测已死（muse-spark 1.2/1.3 region-blocked、exo-free deprecated、jev-1.13 协议不支持、ling-3.0-flash-fin 不可用）。settings.json 已写，待插件重启生效。",
+        "2026-10-11: t4 attempt 4d4a5275 开始（claim+in_progress）。范围已定：C1 数据库事务边界（Database.transaction()，margin/ipo 现金+账本同事务）；C2 margin 金额入口 isfinite 校验；C3 margin _load schema 校验（ipo 已由 t1 修）；C4 强平走可交易检查；C5 trade.py _settle_sell_maker 幽灵单+强平前撤单；I1 计息循环补日；I2 排行榜扣 MarginService.debt；I3 account L4 冻结+do_rebirth 清 margin 账本；I4 main 接线+dayclose hook（无锁变体防死锁）+管理员清账命令+_safe 捕 MarginError/IpoError；I5 config margin_* 键；I6 README P2→P3。入口阻断：corporate.py adjust_price/suspend 签名、engine.adjust_price 缺失、_tick_loop 未调 _maybe_auction_clear、realtime _maybe_day_close 午休误清算+标记先写、news 冲击在落盘后。IPO 整链验证+测试：margin_check 加 N1-N9、新入口集成测试（确定性离线 ShareMarket 调用）。验证通道：ast/纯内存走 code_verify，sqlite 磁盘测试走 pwsh。",
+        "2026-10-11: Our Free Mode 回退链阈值定稿（code_verify 通过）：streamRecovery={enabled:true,totalTimeoutMs:120000,maxContinuationMs:120000}（用户 m00614 要求 2 分钟）；combo:main 链首 stepfun/step-5-preview-free（已验证可用），kimi-k3 降至第 8；combo:main 9 个 + combo:subagent 20 个，overlap=[] 零重叠。全部待插件重启生效。插件工作侧：t1 IPO 完成(200断言)、t2 margin 完成、t3 审查 5C+6I、t4 集成修复进行中（coder_free）、t5 待验收（review_free）。",
+        "2026-10-11: t4 集成阶段的两个回归缺陷已修并全绿：① storage/db.py:145-154 transaction() 的提交走 _commit()（_in_txn=True 时是 no-op）→ 事务写入永不落盘，表现为重启后负债归零；② game/margin.py:491-497 accrue_day 首日息用 days=day-max(last_interest_day,-1) 多算 1 天（day=1 → 2 天息）。修复后 pwsh 通道四套全绿：sim_test 112/112、margin_check 73/73、ipo_check 200/200、log_check 16/16、margin_probe_t3 exit 0。",
+        "2026-10-11: [!] marked done with no passing code_verify recorded in this session — \"done\" is a claim, not evidence. If it truly was verified, run the command again through code_verify (or record the exact command and its output) so the ledger holds the proof; otherwise do not treat this task as proven.",
+        "2026-10-11: team p3-visual-and-wiring（2026-10-11）已建并 running，整体工作继续。8 任务 DAG：t1 req-chart（chart_impl）、t2 req-wiring（wiring_impl）、t3 audit-dayclose（已完成）、t4 wiring-check（test_impl）、t5 chart-fix、t6 wiring-fix、t7 test-write、t8 review-1。captain 已向 chart_impl 发 8 项缺陷验收依据、向 test_impl 发「测试先写 + 断言清单」、向 wiring_impl 发审计结论 + 统一接线顺序。旧 3 个裸子代理已全部停掉。本 session 由 team 成员并行执行实现，captain 监控/解阻塞/转审查/合并。",
+        "2026-10-11: 用户批准在插件目录建 git（m00457「项目没有git可以让我建一个」）。已写 .gitignore 遮蔽 .dsh-code/*.db、__pycache__、charts/、_demo_*.png、.agent-teams 运行态。准备 git init + 首次提交，作为多 agent 并行改动的 diff 兜底。"
+      ]
+    },
+    {
+      "id": "2026-10-11-t4-新建-.dsh-code-wiring_check.py-离线接线测试",
+      "title": "t4 新建 .dsh-code/wiring_check.py 离线接线测试",
+      "status": "active",
+      "acceptance": "",
+      "notes": [
+        "2026-10-11: AgentTeams p3-visual-and-wiring / t4（test_impl, attempt 9b44720d-e68e-47db-a067-0b4e3a3b53c2, in_progress）：新建 .dsh-code/wiring_check.py 离线接线测试。已读 game/dayclose.py（86行，当前无 margin/ipo 参数）、.dsh-code/sim_test.py 前250行、.dsh-code/ipo_check.py 前120行、game/margin.py、game/ipo.py、storage/db.py API、game/trade.py、main.py、locks.py、config.py。范围仅 .dsh-code/wiring_check.py。"
+      ]
+    },
+    {
+      "id": "2026-10-11-t2-req-wiring-ipo-margin-集成需求与验收标准",
+      "title": "t2 [req-wiring] IPO/margin 集成需求与验收标准",
+      "status": "active",
+      "acceptance": "",
+      "notes": [
+        "2026-10-11: AgentTeams t2 (req-wiring, attempt 656dbd7e): 把 /炒股 打新/融资/还券/还款 从预留文案替换为真实实现；ShareMarket 装配 self.ipo/self.margin(传 trade)；_on_loaded 调 await self.ipo.restore()；DayCloseService 加可选 margin 参数并在 _run 接入计息与强平扫描。",
+        "2026-10-11: t2 [req-wiring] 现由团队成员 wiring_impl 执行（attempt 1 in_progress），扩为 t6 wiring-fix。输入已补齐：dayclose 审计 5 条结论（停牌卖出缺 can_trade 是缺陷；强平读 quantity 无 T+1 矛盾但链路未接线；破产重生不清 margin 账本 → 无主负债是缺陷；IPO 共用 cash_frozen + L3 判定不看 frozen 存在丢账路径是缺陷；accrue_day 无调用点、frozen/bankrupt 户利息无界）。统一接线顺序：main.py 喷 MarginService/IPOService → DayCloseService 加可选 margin/ipo 参数 → 日终 0 竞价 → 0.5 corporate → margin._check_margin_calls_nolock()（unlock_all_sellable 前）→ 委托过期 → T+1 解锁 → 行情日切 → ipo.on_day_start → settle_withdrawable → day+=1。"
+      ]
+    },
+    {
+      "id": "2026-10-11-k线图视觉质量修复-chart.py-main.py-prev_close-接线",
+      "title": "K线图视觉质量修复（chart.py + main.py prev_close 接线）",
+      "status": "active",
+      "acceptance": "",
+      "notes": [
+        "2026-10-11: render/intraday 分时图改名 chart_render.render_intraday 前的旧称；现统一用 chart.py:render_kline/render_intraday",
+        "2026-10-11: 现场改为 AgentTeams 团队 p3-visual-and-wiring 编排（m00308 建，8 任务 DAG：t1 req-chart、t2 req-wiring、t3 audit-dayclose、t4 wiring-check、t5 chart-fix、t6 wiring-fix、t7 test-write、t8 review-1）。两条 in-flight 任务现由团队成员执行：t2/wiring 系列由 wiring_impl 全权（t6 输入补齐：dayclose 审计 5 条结论 + 统一接线顺序）；chart 系列由 chart_impl 全权（t5 依赖 t1）。captain 侧不再自行实现。"
+      ]
+    }
+  ],
+  "done": [
+    {
+      "id": "2026-10-11-audit-dayclose-只读审计-dayclose-与-ipo-margin-trade-交互",
+      "title": "audit-dayclose：只读审计 dayclose 与 ipo/margin/trade 交互",
+      "status": "done",
+      "acceptance": "",
+      "notes": [
+        "2026-10-11: AgentTeams p3-visual-and-wiring / t3 (attempt a9cceb89): 只读审计 dayclose 日终清算与 ipo/margin/trade 交互缺陷，5 个子问题逐条给文件:行号证据。已读 game/dayclose.py (86行)、storage/db.py (437行)、game/margin.py (711行)。",
+        "2026-10-11: 完成：子代理 a0ce2db7 返回完整审计报告（m00306），5 条结论均有文件:行号证据。1 停牌股卖出缺 can_trade、resume 零产品调用点、重启丢失停牌状态；2 强平读 quantity 无 T+1 矛盾但链路未接线；3 破产重生不清 margin 账本导致无主负债；4 IPO 共用 cash_frozen 池、L3 判定不看 frozen 存在丢账路径；5 accrue_day 无调用点、缺唯一日计数器、frozen/bankrupt 户利息无界。统一接线顺序建议已给出。"
+      ]
+    },
+    {
+      "id": "2026-10-11-2026-10-11-p2-t1-ipo模块-game-ipo-py",
+      "title": "2026-10-11-P2-t1-IPO模块-game-ipo-py",
+      "status": "done",
+      "acceptance": "",
+      "notes": [
+        "2026-10-11: 接手团队 t1（attempt e32b8516-cfed-4ad7-8cac-4d19e657e2d2，team p2-implementation）。范围队长已确认（m00076）：仅 game/ipo.py、market/engine.py 纯追加公开 register()、.dsh-code/ipo_check.py；不动 storage/db.py、config.py、main.py（接线留 t4）。方案：meta 表 JSON 账本 ipo.ledger.v1（仿 margin 模式）；申购全额预冻结（与 DESIGN §9 中签后缴款不同，报告须明示）；draw 用 random.Random(seed).sample(range(T),k) 确定性抽签；每订阅三态 pending/inflight/settled + 现金/持仓 pre-image 支持崩溃恢复重放不双退款。调研结论：engine 注册需 quotes/anchor/_raw/bars/main_force/st_flag；dayclose 只解冻 orders 表买单，申购冻结互不干扰；SECTORS 校验必须做否则 tick KeyError。",
+        "2026-10-11: t1 [ipo_impl] 完成（attempt 4, eac3ebb7）：game/ipo.py IPOService 三阶段实现+publish NaN/inf 加固+_load 账本 schema 校验（t3 C2/C3 同类）；修复 draw() lot NameError 与 rate 量纲错；.dsh-code/ipo_check.py 200 断言全绿（pwsh，exit=0）+ ast.parse code_verify VERIFIED；集成契约已报队长（main.py 接线/t4 做）。mistakes 落一条：测试硬编码 IPO id 猜错发布顺序。"
+      ]
+    },
+    {
+      "id": "2026-10-11-p2-t3-融资融券独立审查",
+      "title": "P2/t3 融资融券独立审查",
+      "status": "done",
+      "acceptance": "",
+      "notes": [
+        "2026-10-11: AgentTeams t3（review_free，attempt 3b12c506）：独立审查 game/margin.py + .dsh-code/margin_check.py。已读 margin.py/margin_check.py/db.py/trade.py/account.py/leaderboard.py/dayclose.py/locks.py/DESIGN.md §14.3；正在做独立验证（pwsh 跑 margin_check + NaN/坏账本/停牌强平探针）。main.py:661-669 融资/还券仍是\"预留\"桩，未接线。",
+        "2026-10-11: t3 审查完成 (verdict=pass, attempt 3b12c506-f955-40b3-806a-8c6ab2878205)。独立探针 .dsh-code/margin_probe_t3.py (N1-N10, code_verify exit 0) + pwsh 复跑 margin_check.py 73/73 确认。发现 5 Critical：C1 现金与 meta ledger 非原子（_save 失败凭空印钞/计息重复扣，margin.py:204-238,406-447, db.py:154-161）；C2 repay_cash 接受 NaN 抹债+写负现金（margin.py:323-354）；C3 _load 仅捕 JSONDecodeError，缺 loans 键凭空销账（margin.py:76-91）；C4 强平绕过停牌/跌停；C5 强平不撤卖单→空卖+凭空增发（trade.py:360-362）。Important：计息漏日、排行榜不扣负债（leaderboard.py:22-28 刷榜）、爆仓 L3/L4 冲突（account.py:54-83）、未接线+无管理员清账命令（main.py:656-669 桩；dayclose 接入会因 trade_lock 非重入死锁）、config 无 margin_* 键、P2/P3 标签漂移。正向：现金口径防双算正确(N10)、JSON 损坏拒绝(N3a)。报告已发 captain。完整证据在 .dsh-code/journal.jsonl 与探针输出。"
+      ]
+    }
+  ],
+  "blocked": []
+}

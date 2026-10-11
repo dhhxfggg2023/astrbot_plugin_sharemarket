@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "createdAt": "2026-10-11T07:02:06.416Z",
+  "commands": {
+    "compile": "python -m py_compile main.py config.py market\\*.py game\\*.py storage\\db.py",
+    "test": "$env:PYTHONIOENCODING=\"utf-8\"; python .dsh-code\\sim_test.py",
+    "doccheck": "$env:PYTHONIOENCODING=\"utf-8\"; python .dsh-code\\doc_check.py"
+  },
+  "notes": "wiring_check.py 目标：离线接线测试（.dsh-code/wiring_check.py），复用 sim_test.py 伪造 aiosqlite + check()；DB 文件必须放 .dsh-code/（code_verify 通道在插件目录内建不了 sqlite 文件）；不 import main.py；只测 DayCloseService + IPOService + MarginService 的接线语义。sibling 参考实现：.dsh-code/ipo_check.py。",
+  "updatedAt": "2026-10-11T11:13:06.117Z",
+  "stack": "Python 3.10+ / AstrBot Star API（Star 类 + filter.command_group 子命令 + aiosqlite + asyncio tick）",
+  "layout": "main.py（ShareMarket 指令组，唯一 import astrbot 的文件）/ config.py / market{stocks,engine,orderbook,calendar}.py / game{account,trade,leaderboard,dayclose}.py / storage/db.py / .dsh-code/sim_test.py（离线逻辑测试）；业务模块一律不 import astrbot，因此可离线测试"
+}

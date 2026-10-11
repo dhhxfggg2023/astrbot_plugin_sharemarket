@@ -1,0 +1,29 @@
+# data / runtime
+*.db
+*.sqlite
+*.sqlite3
+data/
+*.log
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# dsh ledger generated artifacts (keep the ledger markdown/json under version)
+.dsh-code/*.db
+.dsh-code/.sim_test_*.db
+.dsh-code/__pycache__/
+.dsh-code/*.out
+.dsh-code/*_out*.txt
+
+# agent-teams runtime state (keep nothing noisy; rc logs are volatile)
+.agent-teams/*/rc/
+.agent-teams/*/inbox/
+.agent-teams/*/mailbox.jsonl
+
+# chart outputs
+data/charts/
+_demo_*.png

@@ -1,0 +1,41 @@
+﻿phase()=continuous is_open=True
+N1 OBSERVED: NaN借款被拒(MarginError): 借款金额必须为有限数字（收到 nan）。
+N1 OBSERVED: u1 cash_available=1000000.0 (sqlite 将 NaN 存成 NULL=False)
+N1 OBSERVED: 账本JSON含NaN字面量=False -> None
+N1 OBSERVED: debt(u1)=0.0 (math.isnan=False)
+N1 OBSERVED: margin_ratio(u1)=None; r<1.30 恒False(不触发强平)=n/a
+N1 OBSERVED: check_margin_calls 正常返回 []
+N1 OBSERVED: 排行榜正常渲染 top1 total=1000000.0
+N1 OBSERVED: NaN账户仍可继续借款
+N2 OBSERVED: repay(nan) 抛 MarginError: 还款金额必须为有限数字（收到 nan）。
+N2 OBSERVED: cash_available=100.0 (负数=现金被写负), debt(u2)=300000.0 (0=债务被NaN抹掉)
+N3 借款20万后 debt(u3)=200000.0 cash=1200000.0
+N3a PASS: 账本损坏时 borrow 被 MarginError 拒绝
+N3a PASS: 账本损坏时 repay 被 MarginError 拒绝
+N3a PASS: 账本损坏时 render 被 MarginError 拒绝
+N3a PASS: 账本损坏时 accrue 被 MarginError 拒绝
+N3a PASS: 账本损坏时 margin_calls 被 MarginError 拒绝
+N3b OBSERVED: 缺 loans 键 抛 MarginError: 融资账本损坏（loans 不是映射），已拒绝融资操作。
+N3c OBSERVED: loans=[] 抛 MarginError: 融资账本损坏（loans 不是映射），已拒绝融资操作。
+N3d OBSERVED: 缺字段贷款 抛 MarginError: 融资账本损坏（单条负债 #1 结构非法），已拒绝融资操作，请联系管理员核查。
+N4 OBSERVED: _save 抛 模拟磁盘写失败，异常已冒出业务层
+N4 OBSERVED: 异常后 cash_available=1000000.0 (50万+初始=150万=现金已到账), debt(u4)=0.0 (0=债务未记账) -> 50万凭空印钞且无任何回滚
+N5 OBSERVED: day1计息100.0；直接跳day5只补1天 s5={'charged': 1, 'interest': 400.0, 'skipped': 0}；last_interest_day=5 -> 第2-4天利息永久丢失(漏日)
+N5 OBSERVED: day6首次(落盘失败)现金→1099500.0；同日重跑 s6_again={'charged': 1, 'interest': 100.0, 'skipped': 0} 现金→1099400.0（两次扣息=重复扣息）
+N6 PASS: 停牌中融券被拒: 600001 停牌中，无法交易，不可融券。
+N6 OBSERVED: 停牌(can_trade=False,'停牌中，无法交易')下强平回执: '⚠️ 强平完成：卖出持仓 0 只、买券还券 0 笔。当前维持担保比例 108.9%，净资产 159,804.00 元。'; 强平后持仓={'user_id': 'u6', 'code': '600001', 'quantity': 666600, 'sellable': 666600, 'cost_price': 4.2} (None=停牌股被强平卖出)
+N6b PASS: 跌停中正常卖单被拒: 钢铁联合 已跌停（3.78），卖单无法成交。
+N6b OBSERVED: 跌停价 3.78（正常卖单被拒）下强平回执: '⚠️ 强平完成：卖出持仓 1 只、买券还券 0 笔。当前维持担保比例 负债已清零，净资产 717,832.99 元。'; 持仓=None
+N7 setup: 卖单挂出@4.41 未成交: open_orders=1 asks簿=1 持仓={'user_id': 'u7', 'code': '600001', 'quantity': 666600, 'sellable': 666500, 'cost_price': 4.2}
+N7 setup: 强平后持仓=None DB未成交卖单=1 asks簿残留=1 (簿中残留=空卖源头)
+N7 OBSERVED: 接盘买入回执: '未成交，100 股已挂单排队。'
+N7 OBSERVED: 接盘侠收货=None 付款=0.0元; 强平者(u7)现金变化=0.0元 (0=交付方未收钱); u7成交流水笔数=1
+N7 OBSERVED: 幽灵卖单被撮合成交——买方付款后由 _apply_buy_fill 凭空得股（trade.py:360-362 无持仓直接 return，买方照扣款收货），账本股数凭空增发
+N8 setup: 强平后状态=frozen debt=936819.38
+N8 OBSERVED: 冻结户还款被拒: 账户已冻结（融资爆仓负债中，L4），请联系管理员清账后再操作。
+N8 OBSERVED: 冻结户还券被拒: 账户已冻结（融资爆仓负债中，L4），请联系管理员清账后再操作。
+N8 OBSERVED: 全库无管理员清账入口（main.py 管理员组仅 暂停/恢复/状态）
+N9 OBSERVED: 借款前 u9 total=1000000.0 return%=0.00; 借款330万后榜一=u9 total=4300000.0 return%=330.00 (净资产仍100万=借入不算利润，但榜单按 cash+mv 不扣负债)
+N10 OBSERVED: 可用100/可取999999/冻结50 -> assets=150.0 (=150=可用+冻结, 不含可取, 防双算正确)
+
+==== 探针结束: 0 项断言通过 ====
