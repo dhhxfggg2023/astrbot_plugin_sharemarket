@@ -18,7 +18,7 @@
 | 委托当日有效 | 日终 `expire_open_orders()` + 释放冻结 |
 | 破产与重生 | L1/L2/L3 分级判定、L3 落库、重生冷却 24h + 50% 资金 + 终身 3 次 |
 | 排行榜 | 收益率优先、总资产辅助，破产玩家墓碑展示 |
-| 指令 | `/炒股` 指令组 15 个玩家子命令（开户/行情/个股/盘口/搜/买入/卖出/撤单/持仓/委托/成交/资金/排行/重生/帮助）+ 管理员子组 3 条（状态/暂停市场/恢复市场，需平台 ADMIN 权限） |
+| 指令 | `/炒股` 指令组玩家子命令（开户/行情/个股/盘口/搜/买入/卖出/撤单/持仓/委托/成交/资金/排行/重生/帮助 等约 45 条）；原管理员子组已移除（运维开关改走插件设置，见 §19） |
 | 日志体系 | `log.py`：业务模块用标准库 logging（命名空间 `sharemarket.*`），`main.py` 启动时桥接 AstrBot logger + 落盘 `sharemarket.log`（1MB×5 轮转，UTF-8）；埋点覆盖启动、心跳、tick 异常堆栈、每笔成交、下单撤单、拒单限流、开户、L3 破产、重生、日终清算 |
 | 成交流水 | `trades` 表逐笔记录（委托号/用户/代码/方向/价格/数量/费用/时间），供 `/炒股 成交` 与对账；`db.stats()` 提供账户/持仓/委托/成交/冻结统计 |
 | 并发安全 | `locks.py` 全局交易锁串行化下单、撤单、日终清算，避免清算与成交交叉改账本 |
@@ -39,7 +39,8 @@
 
 ### P1-1 板块联动（已完成 2026-10-11）
 
-- **股票池扩容**：36 → **78 只，10 个板块**（金融7 消费8 医药7 科技9 新能源8 周期10 基建地产7 运输公用8 汽车军工7 农业传媒7），每板块 ≥7 只——原池 36 只散在 29 个行业里，每个行业 1 只，联动根本看不出来。
+- **股票池扩容**：36 → 第一阶段 78 → **150 只，10 个板块（每板块 15 只）**（金融15 消费15 医药15 科技15 新能源15 周期15 基建地产15 运输公用15 汽车军工15 农业传媒15）——原池 36 只散在 29 个行业里，每个行业 1 只，联动根本看不出来；第一阶段扩容后每板块 ≥7 只，再扩到 150 只使每板块满 15 只，联动更稳、搜索与板块榜样本更足。
+- **3 位短码**：每只股票在 6 位原码 `code` 之外新增 `short_code`（板块拼音首字母 + 2 位序号，如 `JR01`/`XF03`/`KJ05`/`XNY02`），10 板块前缀：金融 `JR` / 消费 `XF` / 医药 `YY` / 科技 `KJ` / 新能源 `XNY` / 周期 `ZQ` / 基建地产 `JC` / 运输公用 `YS` / 汽车军工 `QC` / 农业传媒 `NY`。由 `_build_pool` 按板块内顺序自动生成（`prefix + f"{idx:02d}"`），保证唯一；`Stock.lookup` 同时接受 6 位原码与 3 位短码（先查 `STOCK_POOL`，再查 `STOCK_BY_SHORT`），原 6 位码完全保留向后兼容。`short_code` 默认为 `""` 供 IPO 临时股使用（不进 `STOCK_BY_SHORT`）。
 - **三层因子模型**（`market/engine.py`）：大盘因子 AR(1)（日目标 1.2%）→ 板块因子 AR(1)（日目标 1.2%，每板块独立）→ 个股特质波动（`Stock.volatility` 按日口径）；`ret = beta·dM + sector_beta·dSec + idio + 均值回归 + 供需冲击`。
 - **标定修正**：AR(1) 的 n 期累积方差必须用 `n/(1-φ)² − 2φ(1-φⁿ)/(1-φ)³` 折算，按 √n 会放大近 10 倍；内部价保留全精度（`_raw`），只有展示价取整到 0.01，否则低价股波动被网格抹平。
 - **板块指数与展示**：`/炒股 行情` 给出强势/弱势板块榜；`/炒股 个股` 给出所属板块及其涨跌。
@@ -113,7 +114,7 @@
 
 ## 1. 交易品种与板块
 
-**股票池**（可配置，起步 60–100 只，覆盖各板块，`market/stocks.py` 定义）：
+**股票池**（`market/stocks.py` 定义，**150 只 / 10 个板块，每板块 15 只**，每只同时拥有 6 位原码 `code` 与 3 位短码 `short_code`）：
 
 | 代码段 | 板块 | 涨跌幅 | 特征 |
 |---|---|---|---|
@@ -127,11 +128,14 @@
 每只股票属性（`stocks.py`）：
 
 ```
-code, name, exchange(沪/深/北), board(主板/创业/科创/北交),
+code(6 位原码), name, exchange(沪/深/北), board(主板/创业/科创/北交),
 industry(行业板块), initial_price, volatility(σ 年化波动率), drift(μ),
 beta(对大盘敏感度), float_market_cap(流通市值), pe, pb,
-is_st, ipo_date, 是否融资融券标的
+is_st, ipo_date, 是否融资融券标的,
+short_code(3 位短码：板块拼音首字母 + 2 位序号，如 JR01/XF03/KJ05/XNY02)
 ```
+
+`Stock.lookup(code)` 同时接受 6 位原码与 3 位短码（先查 `STOCK_POOL`，再查 `STOCK_BY_SHORT`），原 6 位码完全保留向后兼容。10 板块短码前缀：金融 `JR` / 消费 `XF` / 医药 `YY` / 科技 `KJ` / 新能源 `XNY` / 周期 `ZQ` / 基建地产 `JC` / 运输公用 `YS` / 汽车军工 `QC` / 农业传媒 `NY`，由 `_build_pool` 按板块内顺序自动生成，保证唯一。
 
 行业板块挂**行业指数**，用于板块联动（§13.2）。
 
@@ -269,7 +273,7 @@ is_st, ipo_date, 是否融资融券标的
 
 - 生成分时、日/周/月 K（OHLCV）。
 - 计算 MA5/10/20/60、MACD、KDJ、RSI、BOLL、量比、换手率。
-- QQ 内用文本/ASCII 图或 matplotlib 出图发送。
+- QQ 内用 Pillow 出图发送（`render/chart.py`，缺 Pillow 回退文本 sparkline）。
 
 ---
 
@@ -372,7 +376,9 @@ is_st, ipo_date, 是否融资融券标的
 
 ---
 
-## 19. 滥用治理与管理员权限
+## 19. 滥用治理与运维开关
+
+> 2026-10-21 变更：管理员指令组已整体移除。运维开关改由 AstrBot「插件设置」承担——`market_mode`（交易时段模式）、`market_paused`（暂停行情）、`notice`（置顶公告）；重置/发钱/封禁/清盘这类逐用户操作不再提供聊天入口，需要时直接改库或停用插件。下文保留原设计记录以便追溯。
 
 | 威胁 | 对策 |
 |---|---|
@@ -381,7 +387,7 @@ is_st, ipo_date, 是否融资融券标的
 | 自我对倒抬市值 | 撮合要求对手方 |
 | 机器人被踢/掉线 | 后台 tick 继续，SQLite 恢复 |
 
-**管理员指令**：
+**原管理员指令（已移除）**：
 
 ```
 /炒股 管理员 暂停市场           全服停牌
@@ -421,11 +427,12 @@ astrbot_plugin_sharemarket/
 ├── storage/
 │   └── db.py                # SQLite 持久化
 ├── render/
-│   └── chart.py             # matplotlib K线图（可选）
+│   ├── chart.py             # Pillow K线图（分时/日K，可选）
+│   └── cards.py             # Pillow 信息卡片（10 类：行情/个股/盘口/持仓/资金/排行/龙虎榜/资金流/异动榜/道具商店）
 └── commands/                # 子命令处理器
 ```
 
-**技术栈**：Python 3.10+，AstrBot Star API，`aiosqlite`，`matplotlib`（可选），`asyncio`。
+**技术栈**：Python 3.10+，AstrBot Star API，`aiosqlite`，`Pillow`（可选，图片渲染），`asyncio`。
 
 **已确认的 AstrBot API 事实**（来源：docs.astrbot.app 官方文档，2026-06 版）：
 
@@ -443,7 +450,44 @@ astrbot_plugin_sharemarket/
 
 ---
 
-## 21. 分阶段路线图 + 验收标准
+## 20.1 图片渲染与文本降级（`render/`）
+
+两类渲染模块，均**只依赖 Pillow**（不引入 matplotlib 等重依赖），缺 Pillow 或发送失败时一律**回退文本**——聊天里永远有输出。
+
+### 20.1.1 渲染层契约
+
+- `render/chart.py`：K 线图（分时折线 + 面积渐变 / 日 K 蜡烛 + MA/成交量），`render_kline` / `render_intraday`。
+- `render/cards.py`：10 类信息卡片，与 `chart.py` 共用同一深色金融终端主题（色板、字体、胶囊样式从 `render.chart` 导入，单一事实源避免漂移）。10 个 `render_*` 函数：
+
+| 函数 | 卡片内容 | 对应指令 |
+|---|---|---|
+| `render_market_overview` | 大盘指数 + 市场情绪条 + 板块热力条 + 涨跌榜 | `/炒股 行情` |
+| `render_stock_detail` | 现价/涨跌幅 + 开高低/昨收/涨跌停 + 板块/成交量/主力净流入 | `/炒股 个股 <代码>` |
+| `render_orderbook` | 买卖五档横向对比条（卖在上买在下） | `/炒股 盘口 <代码>` |
+| `render_holdings` | 持仓量/成本/现价/盈亏/盈亏% | `/炒股 持仓` |
+| `render_funds` | 可用/冻结/可取/总资产 四色块 | `/炒股 资金` |
+| `render_leaderboard` | 名次/名称（NPC 带 🤖 标记 + 重生次数）/收益率/总资产 | `/炒股 排行` |
+| `render_dragon_tiger` | 龙虎榜：每只股票一组，席位买卖横向条形对比 | `/炒股 龙虎榜` |
+| `render_fund_flow` | 主力资金净流入双向柱状图（零轴居中） | `/炒股 资金流` |
+| `render_anomaly` | 异动榜：类型胶囊 + 数值/阈值/现价/涨跌幅 | `/炒股 异动` |
+| `render_props_shop` | 道具商店网格 + 我的背包 | `/炒股 道具` |
+
+所有 `render_*` 缺 Pillow 返回 `None`，由调用方（`main.py`）回退纯文本。卡片布局采用 2× 超采样后 LANCZOS 降采样，W=900 定宽。
+
+### 20.1.2 主流程降级路径
+
+`main.py` 的 `_send_card(event, fn_name, out_name, *args)` 统一处理：
+
+1. `from .render import cards`；若 `cards.available()` 为 False（无 Pillow）→ 返回 False，调用方走原文本分支。
+2. 调用对应 `render_*` 生成 PNG，落盘到 `data_dir/cards/`。
+3. `await event.send(event.image_result(str(path)))` 发送图片。
+4. 任意环节异常 → 捕获日志 → 返回 False → 调用方回退文本。
+
+行情/个股/盘口/持仓/资金/排行/龙虎榜/资金流/异动榜/道具 10 条指令全部走"图片优先 + 文本降级"；K 线指令走 chart.py 同构路径。
+
+---
+
+
 
 ### P0 MVP（可玩的完整闭环）
 
@@ -471,6 +515,16 @@ astrbot_plugin_sharemarket/
 ### P3 进阶
 
 融资融券 + ST/退市 + 成就系统 + 排行榜历史曲线 + 破产榜叙事。
+
+### P4 活跃度与玩家经济体（已完成 2026-10-11）
+
+自选股`/炒股 自选[加|删]` + 成就 `/炒股 成就` + 排行榜历史 `/炒股 排行历史` + 破产榜 `/炒股 破产榜` + 玩家自发行股票 `/炒股 发行|我的发行|申购` + 模拟股民警 NPC `/炒股 npc[开|关]`。
+
+- NPC 账户挂 `npc:<i>` 前缀，`storage/db.py:263 list_accounts(is_npc)` 三态过滤（True 只 NPC / False 只真实玩家 / None 全表）；`storage/db.py stats()` 与 `game/leaderboard.py top()/snapshot_day()/render_bankrupt()` 三处一律 `is_npc=False`，NPC 不污染玩家口径。
+- NPC 只产决策不持锁：`game/npc.py tick()` 返回决策列表，`run_orders()` 由调用方在 `main.py _tick_loop` 里不持锁执行，下单逐个经 `TradeService.buy/sell` 取锁，不绕过冻结/可卖/涨跌停校验。
+- 玩家自发行走同一条 `game/ipo.py subscribe()/draw()` 路径，`player_ipos` 表（`PRIMARY KEY(issuer, code)`）落盘；发行人预缴承销担保金 `reserve`，摇号完成经 `draw()` 3b) 段以 `reserve_released` 标志幂等解冻退回可用。
+- 离线验收统一在 `.dsh-code/wiring_check.py` 追加 section 8（自发行 9 条）+ section 9（NPC 19 条），不做第二个测试 owner。
+- 回归基线：`python .dsh-code/sim_test.py` 112 通过 / 0 失败，`python -u .dsh-code/wiring_check.py` 103 通过 / 0 失败（pwsh 通道；code_verify 通道在 `.dsh-code` 下只读会报 `sqlite3.OperationalError`，是通道坑非缺陷）。
 
 ---
 

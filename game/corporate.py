@@ -5,6 +5,10 @@
 
 资产守恒：除权除息只改变"价格 × 数量"的构成，总资产不变（股息到账、股数增加、
 每股价格等比例下调），这是可以断言的性质。
+
+退市（DESIGN §10 / D11）：面值退市触发后先进入退市整理期继续交易若干
+虚拟交易日，逐日收集收盘价；期满按整理期均价强制清算（不是固定折扣）。
+状态保存在服务实例内（进程重启后需再次满足触发条件才会重新进入整理期）。
 """
 
 from __future__ import annotations
@@ -18,6 +22,10 @@ from ..storage.db import Database
 
 log = get_logger("corporate")
 
+# 退市整理期长度（虚拟交易日）。真实规则为 15 个交易日；虚拟日节奏下
+# 简化为 3 日——足够让均价反映整理期走势，又不让持仓挂账过久（§10 允许简化）。
+DELIST_PERIOD_DAYS = 3
+
 
 class CorporateService:
     def __init__(self, db: Database, engine, news=None,
@@ -26,6 +34,8 @@ class CorporateService:
         self.engine = engine
         self.news = news
         self.rng = rng or random.Random()
+        # 退市整理期：code → 已收集的每日收盘价（D11 清算价的数据源）
+        self._delisting: dict[str, list[float]] = {}
 
     async def run_day(self) -> dict:
         """返回本日事件统计（供日志与快讯）。"""
@@ -37,6 +47,11 @@ class CorporateService:
             if q is None:
                 continue
             stock = STOCK_POOL[code]
+
+            # ── 退市整理期：逐日收集收盘价，期满按均价清算（D11）──
+            if code in self._delisting:
+                await self._delist_step(code, q, stock, stats)
+                continue          # 整理期内不再触发其他公司行为
 
             # ── 分红 / 送转 ──────────────────────────────
             if self.rng.random() < CFG.dividend_prob:
@@ -72,10 +87,10 @@ class CorporateService:
                     await self._announce(
                         "利好", f"{stock.name}撤销风险警示，摘帽成功")
 
-            # ── 面值退市 ────────────────────────────────
+            # ── 面值退市 → 进入退市整理期 ─────────────────
             if (self.engine.is_st(code) and q.price < CFG.delist_price
                     and self.rng.random() < CFG.delist_prob):
-                await self._delist(code, q, stock, stats)
+                await self._enter_delisting(code, q, stock, stats)
 
         if any(stats.values()):
             log.info("公司行为：%s", "、".join(
@@ -127,10 +142,35 @@ class CorporateService:
         log.info("送转：%s %s 比例 %.2f，影响 %d 个账户", stock.name, code,
                  ratio, holders)
 
-    # ── 退市 ─────────────────────────────────────────────
-    async def _delist(self, code, q, stock, stats) -> None:
-        """面值退市：按退市整理期折算价强制清算持仓。"""
-        price = round(q.price * 0.5, 2)      # 整理期通常继续下跌，按半价清算
+    # ── 退市（DESIGN §10 / D11：整理期 → 均价清算）───────
+    async def _enter_delisting(self, code, q, stock, stats) -> None:
+        """面值退市触发：进入退市整理期，当日收盘价为均价样本之一。"""
+        self._delisting[code] = [round(q.price, 2)]
+        stats["delist"] += 1
+        await self._announce(
+            "利空", f"{stock.name}连续低于面值被决定终止上市，进入 "
+                    f"{DELIST_PERIOD_DAYS} 个交易日的退市整理期，"
+                    f"期满按整理期均价强制清算")
+        log.warning("退市整理期：%s %s（首日收盘 %.2f，共 %d 个交易日）",
+                    stock.name, code, q.price, DELIST_PERIOD_DAYS)
+
+    async def _delist_step(self, code, q, stock, stats) -> None:
+        """整理期每日推进：记录收盘价；期满按整理期均价清算持仓（D11）。"""
+        samples = self._delisting.get(code)
+        if samples is None:
+            return
+        if self.engine.is_suspended(code):
+            # 停牌日不是交易日，不计入整理期
+            log.info("退市整理期：%s %s 停牌，本期不计入", stock.name, code)
+            return
+        samples.append(round(q.price, 2))
+        if len(samples) < DELIST_PERIOD_DAYS:
+            log.info("退市整理期：%s %s 第 %d/%d 日 收盘 %.2f", stock.name,
+                     code, len(samples), DELIST_PERIOD_DAYS, q.price)
+            return
+
+        price = round(sum(samples) / len(samples), 2)   # 整理期均价
+        del self._delisting[code]
         holders = 0
         for pos in await self.db.get_position_holders(code):
             acc = await self.db.get_account(pos["user_id"])
@@ -143,12 +183,12 @@ class CorporateService:
             await self.db.delete_position(pos["user_id"], code)
             holders += 1
         self.engine.delist(code)
-        stats["delist"] += 1
         await self._announce(
-            "利空", f"{stock.name}因连续低于面值被终止上市，"
-                    f"持仓按 {price:.2f} 元强制清算（{holders} 个账户受影响）")
-        log.warning("退市清算：%s %s 清算价 %.2f，%d 个账户", stock.name,
-                    code, price, holders)
+            "利空", f"{stock.name}退市整理期结束，按整理期均价 {price:.2f} 元"
+                    f"强制清算（{holders} 个账户受影响）")
+        log.warning("退市清算：%s %s 整理期均价 %.2f（%d 日样本 %s），%d 个账户",
+                    stock.name, code, price, len(samples),
+                    "/".join(f"{p:.2f}" for p in samples), holders)
 
     # ── 快讯 ─────────────────────────────────────────────
     async def _announce(self, kind: str, headline: str) -> None:

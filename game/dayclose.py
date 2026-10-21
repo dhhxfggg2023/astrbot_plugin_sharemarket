@@ -41,10 +41,25 @@ class DayCloseService:
         self.ipo = ipo              # IPOService（可选，新股首日涨跌幅到期）
         self._day_seq = 0           # 虚拟交易日序号（计息/日切 key）
 
-    async def run(self) -> int:
-        """执行日终清算，返回过期委托数。"""
+    async def run(self, leaderboard=None, price_of=None) -> int:
+        """执行日终清算，返回过期委托数。
+
+        leaderboard / price_of 可选：传入则在 **trade_lock 锁外** 落一条
+        排行榜快照（t1 死锁教训——锁边界越短越安全；锁内 O(N) 次 await 会
+        阻塞期间所有下单/撤单指令）。快照失败只记日志，不回滚日终主流程。
+        """
         async with trade_lock():
-            return await self._run()
+            expired = await self._run()
+        # 锁外落快照：db.transaction() 不 acquire trade_lock（已验证），
+        # 锁外 O(N) 次 await 不会阻塞交易指令。
+        if leaderboard is not None and price_of is not None:
+            day_ts = int(time.time() // 86400 * 86400)
+            try:
+                n = await leaderboard.snapshot_day(day_ts, price_of)
+                log.info("排行榜快照：day_ts=%d 写入 %d 条", day_ts, n)
+            except Exception:
+                log.exception("排行榜快照失败（不影响日终主流程）")
+        return expired
 
     async def _run(self) -> int:
         self._day_seq += 1
@@ -59,9 +74,17 @@ class DayCloseService:
         if self.corporate is not None:
             await self.corporate.run_day()
 
-        # 0.6) 融资融券：计息 + 强平扫描
-        #      必须在 unlock_all_sellable 之前，因为强平可卖全部持仓（无视 T+1）
+        # 0.6) 融资融券：先计息、后强平扫描
+        #      必须先计息再强平：利息计入负债后维持担保比例才会反映当日真实
+        #      风险；且两步都必须在 unlock_all_sellable 之前——强平可卖全部
+        #      持仓（无视 T+1），若先解锁强平与 T+1 的语义边界会重叠。
+        #      这里必须调 *_nolock 变体：run() 已持全局锁，锁非重入。
         if self.margin is not None:
+            accrued = await self.margin._accrue_day_nolock(day_key)
+            if accrued.get("interest", 0.0) > 0:
+                log.info("日终计息：%d 笔负债，利息 %.2f 元",
+                         accrued.get("charged", 0),
+                         accrued.get("interest", 0.0))
             reports = await self.margin._check_margin_calls_nolock()
             if reports:
                 for r in reports:
@@ -94,8 +117,9 @@ class DayCloseService:
         await self.db.day_close_prices()
 
         # 4) IPO：新股首日涨跌幅到期推进（解除覆盖、恢复常规涨跌幅）
+        #     run() 已持 trade_lock（:46），锁非重入，必须调无锁变体。
         if self.ipo is not None:
-            cleared = await self.ipo.on_day_start(day_key)
+            cleared = await self.ipo._on_day_start_nolock(day_key)
             if cleared:
                 log.info("IPO 日切：%d 只新股免涨跌幅期满", cleared)
 

@@ -8,12 +8,14 @@
 
 `market_mode="247"`（演示）用虚拟交易日长度切分阶段；`"realtime"` 用真实时钟窗口。
 `SESSION` 是模块级单例，主循环在每个虚拟交易日开始时 `reset()`。
+`is_trading_day()` = 工作日且非法定节假日（内置 2024–2026 节假日表，
+模块级 `HOLIDAYS` 可整体替换实现自定义休市）。
 """
 
 from __future__ import annotations
 
 import time
-from datetime import datetime, time as dtime
+from datetime import date, datetime, time as dtime, timedelta
 
 from ..config import CFG
 
@@ -28,10 +30,63 @@ _CONTINUOUS = [(dtime(9, 30), dtime(11, 30)), (dtime(13, 0), dtime(14, 57))]
 _AUCTION_OPEN = (dtime(9, 15), dtime(9, 25))
 _AUCTION_CLOSE = (dtime(14, 57), dtime(15, 0))
 
+# ── 法定节假日表（DESIGN §3：内置节假日表，可配置）─────────────
+# 数据源：国务院办公厅年度通知，区间含首尾、含段内周末：
+#   2024 国办发明电〔2023〕7号 / 2025 国办发明电〔2024〕12号 /
+#   2026 国办发明电〔2025〕7号
+# 只记"放假"区间：调休上班的周末不录——A 股周末恒休，调休日不开市。
+# 扩展：向此表追加 (起, 止, 节日) 后重建 HOLIDAYS（见 _build_holidays）。
+_HOLIDAY_SPANS: tuple[tuple[str, str, str], ...] = (
+    ("2024-01-01", "2024-01-01", "元旦"),
+    ("2024-02-10", "2024-02-17", "春节"),
+    ("2024-04-04", "2024-04-06", "清明节"),
+    ("2024-05-01", "2024-05-05", "劳动节"),
+    ("2024-06-10", "2024-06-10", "端午节"),
+    ("2024-09-15", "2024-09-17", "中秋节"),
+    ("2024-10-01", "2024-10-07", "国庆节"),
+    ("2025-01-01", "2025-01-01", "元旦"),
+    ("2025-01-28", "2025-02-04", "春节"),
+    ("2025-04-04", "2025-04-06", "清明节"),
+    ("2025-05-01", "2025-05-05", "劳动节"),
+    ("2025-05-31", "2025-06-02", "端午节"),
+    ("2025-10-01", "2025-10-08", "国庆节、中秋节"),
+    ("2026-01-01", "2026-01-03", "元旦"),
+    ("2026-02-15", "2026-02-23", "春节"),
+    ("2026-04-04", "2026-04-06", "清明节"),
+    ("2026-05-01", "2026-05-05", "劳动节"),
+    ("2026-06-19", "2026-06-21", "端午节"),
+    ("2026-09-25", "2026-09-27", "中秋节"),
+    ("2026-10-01", "2026-10-07", "国庆节"),
+)
+
+
+def _build_holidays() -> frozenset[date]:
+    out: set[date] = set()
+    for a, b, _name in _HOLIDAY_SPANS:
+        d = date.fromisoformat(a)
+        end = date.fromisoformat(b)
+        while d <= end:
+            out.add(d)
+            d += timedelta(days=1)
+    return frozenset(out)
+
+
+# 公开可配置：整体替换该集合即可覆盖/追加节假日（如自定义休市安排）
+HOLIDAYS: frozenset[date] = _build_holidays()
+
+
+def is_holiday(now: datetime | None = None) -> bool:
+    """是否落在法定节假日区间（含段内周末；与周末判断正交）。"""
+    now = now or datetime.now(TZ)
+    return now.date() in HOLIDAYS
+
 
 def is_trading_day(now: datetime | None = None) -> bool:
+    """交易日 = 工作日（周一至周五）且非法定节假日。"""
     now = now or datetime.now(TZ)
-    return now.weekday() < 5  # 法定节假日表尚未接入
+    if now.weekday() >= 5:
+        return False
+    return now.date() not in HOLIDAYS
 
 
 def is_open(now: datetime | None = None) -> bool:

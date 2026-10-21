@@ -468,9 +468,10 @@ class MarginService:
         直接跳过，重启后重复调用同一 day 不会重复扣息。返回统计。"""
         async with trade_lock():
             async with self.db.transaction():
-                return await self._accrue_day(day)
+                return await self._accrue_day_nolock(day)
 
-    async def _accrue_day(self, day: int) -> dict:
+    async def _accrue_day_nolock(self, day: int) -> dict:
+        """无锁变体：调用方须已持 trade_lock 且在事务内（日终锁内防死锁）。"""
         ledger = await self._load()
         stats = {"charged": 0, "interest": 0.0, "skipped": 0}
         loans = self._open_loans(ledger)

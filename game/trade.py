@@ -6,6 +6,12 @@
 - cash_withdrawable 可取资金（卖出所得当日不可取，日终结算）
 
 股份冻结：卖单未成交部分从 sellable 中预扣；撤单/过期归还；日终 T+1 统一解锁。
+
+委托类型（DESIGN.md §4）：
+- 限价单：指定价格，未成交挂单排队。
+- 市价单：price=None 时生效——买入委托价取涨停价、卖出取跌停价，
+  立即可吃穿对手方最优档位成交（成交价不会劣于该保护价），未成交
+  部分按保护价挂单排队；集合竞价阶段市价单明确拒绝（只收限价委托）。
 """
 
 from __future__ import annotations
@@ -54,6 +60,9 @@ class TradeService:
     # ── 买入 ──────────────────────────────────────────────
     async def buy(self, user_id: str, code: str, quantity: int,
                   price: float | None = None) -> str:
+        """买入。price=None 为市价单（DESIGN §4）：委托价取涨停价，
+        立即与对手方最优档位成交，未成交部分按涨停价挂单排队；
+        带价为限价单。"""
         async with trade_lock():
             return await self._buy(user_id, code, quantity, price)
 
@@ -65,7 +74,10 @@ class TradeService:
         acc = await self._get_active_account(user_id)
         stock = STOCK_POOL[code]
         quote = self.engine.get(code)
-        limit_price = round(price, 2) if price else quote.limit_up(stock)
+        # 市价单（DESIGN §4）：price=None → 委托价取涨停价作保护价，保证
+        # 能吃穿对手方五档；限价单按用户委托价。成交价均不劣于委托价。
+        market = price is None
+        limit_price = quote.limit_up(stock) if market else round(price, 2)
         self._check_limit(stock, quote, limit_price, "buy")
 
         # 资金校验：按限价估算总成本（含费用）
@@ -109,28 +121,35 @@ class TradeService:
         await self._refresh_order(order_id)
         await self._post_trade_bankruptcy_check(user_id)
 
-        log.info("买入 %s %s %d股 限价%.2f 成交%d股 花费%.2f 冻结%.2f 委托#%s",
-                 user_id, code, quantity, limit_price, filled_qty, spent_total,
+        price_tag = ("市价" if market else "限价") + f"@{limit_price:.2f}"
+        log.info("买入 %s %s %d股 %s 成交%d股 花费%.2f 冻结%.2f 委托#%s",
+                 user_id, code, quantity, price_tag, filled_qty, spent_total,
                  freeze_amt, order_id)
 
         return self._fill_report("买入", code, quantity, filled_qty,
                                  fills, order_id, spent=spent_total,
-                                 frozen=freeze_amt)
+                                 frozen=freeze_amt, market=market,
+                                 limit_price=limit_price)
 
     # ── 卖出 ──────────────────────────────────────────────
     async def sell(self, user_id: str, code: str, quantity: int,
                    price: float | None = None) -> str:
+        """卖出。price=None 为市价单（DESIGN §4）：委托价取跌停价，
+        立即与对手方最优档位成交，未成交部分按跌停价挂单排队；
+        带价为限价单。"""
         async with trade_lock():
             return await self._sell(user_id, code, quantity, price)
 
     async def _sell(self, user_id: str, code: str, quantity: int,
                     price: float | None = None) -> str:
         if calendar.SESSION.is_auction():
-            return await self.place_auction(user_id, code, "sell", quantity, price)
+            return await self.place_auction(user_id, code, "sell", quantity,
+                                            price)
         if code not in STOCK_POOL:
             raise TradeError(f"股票 {code} 不存在，可用 /炒股 搜 <关键词> 查询。")
         if quantity <= 0:
             raise TradeError("卖出数量必须为正数。")
+        self._ensure_tradable(code)
         if not calendar.is_open():
             raise TradeError("当前非交易时段，无法下单。")
         await self._get_active_account(user_id)
@@ -152,7 +171,10 @@ class TradeService:
 
         stock = STOCK_POOL[code]
         quote = self.engine.get(code)
-        limit_price = round(price, 2) if price else quote.limit_down(stock)
+        # 市价单（DESIGN §4）：price=None → 委托价取跌停价作保护价，保证
+        # 能吃穿对手方五档买盘；限价单按用户委托价。成交价均不劣于委托价。
+        market = price is None
+        limit_price = quote.limit_down(stock) if market else round(price, 2)
         self._check_limit(stock, quote, limit_price, "sell")
 
         order_id = await self.db.insert_order(
@@ -187,12 +209,14 @@ class TradeService:
         await self._refresh_order(order_id)
         await self._post_trade_bankruptcy_check(user_id)
 
-        log.info("卖出 %s %s %d股 限价%.2f 成交%d股 到账%.2f 委托#%s",
-                 user_id, code, quantity, limit_price, filled_qty, proceeds,
+        price_tag = ("市价" if market else "限价") + f"@{limit_price:.2f}"
+        log.info("卖出 %s %s %d股 %s 成交%d股 到账%.2f 委托#%s",
+                 user_id, code, quantity, price_tag, filled_qty, proceeds,
                  order_id)
 
         return self._fill_report("卖出", code, quantity, filled_qty,
-                                 fills, order_id, gained=proceeds)
+                                 fills, order_id, gained=proceeds,
+                                 market=market, limit_price=limit_price)
 
     # ── 撤单 ──────────────────────────────────────────────
     async def cancel(self, user_id: str, order_id: int) -> str:
@@ -301,7 +325,10 @@ class TradeService:
         if quantity <= 0:
             raise TradeError("数量必须为正整数。")
         if price is None:
-            raise TradeError("集合竞价阶段只能限价委托，请带上价格。")
+            raise TradeError(
+                "集合竞价阶段只接受限价委托，市价单会被拒绝（竞价不连续"
+                "撮合，无法保证对手价）。请带上委托价，例如 "
+                "/炒股 买入 600001 1000 10.50。")
         acc = await self._get_active_account(user_id)
         stock = STOCK_POOL[code]
         quote = self.engine.get(code)
@@ -326,6 +353,9 @@ class TradeService:
             await self.db.update_order_frozen(order_id, lock)
             frozen_note = f"冻结 {lock:,.2f} 元"
         else:
+            # 停牌/退市校验：与买入 _check_common → _ensure_tradable 同源。
+            # 集合竞价同样不可挂卖单（corporate 停牌/退市日终生效）。
+            self._ensure_tradable(code)
             pos = await self.db.get_position(user_id, code)
             if not pos or pos["quantity"] <= 0:
                 raise TradeError(f"你没有持有 {code}。")
@@ -369,10 +399,27 @@ class TradeService:
         if order.side == "buy":
             fee = fees_buy(amount)
             total = amount + fee
-            pay = min(total, acc["cash_frozen"] or 0.0)
+            # 结算口径只认**订单级**冻结（orders.frozen，place_auction 逐笔冻结）。
+            # 账户级 cash_frozen 是所有在途委托的合集：拿它结算一笔竞价成交，
+            # 多笔委托并存时会把别人的冻结当成自己的，再回头从可用的补差额，
+            # 而买单成交前可用早已被冻结清空 → cash cannot be negative
+            # （2026-10-12 生产日志 3689 次，日终清完整条链被它掐断）。
+            row0 = await self.db.get_order(order.order_id)
+            held = float((row0["frozen"] if row0 else 0.0) or 0.0)
+            pay = min(total, held)
+            need = round(total - pay, 2)
+            avail = float(acc["cash_available"] or 0.0)
+            from_avail = min(need, max(avail, 0.0))
+            if need - from_avail > 0.005:
+                log.error("竞价结算资金缺口：%s 委托#%s 需 %.2f，订单冻结 %.2f，"
+                          "可用 %.2f，差额 %.2f 未扣（按上限结算，对账排查）",
+                          order.user_id, order.order_id, total, held, avail,
+                          need - from_avail)
             consumed = pay
-            await self._move_cash(order.user_id, available=-(total - pay),
-                                  withdrawable=-total, frozen=-pay)
+            withdrawable = float(acc["cash_withdrawable"] or 0.0)
+            wd_pay = min(round(pay + from_avail, 2), max(withdrawable, 0.0))
+            await self._move_cash(order.user_id, available=-from_avail,
+                                  withdrawable=-wd_pay, frozen=-pay)
             await self._apply_buy_fill(order.user_id, code, price, qty)
         else:
             fee = fees_sell(amount)
@@ -602,11 +649,17 @@ class TradeService:
     def _fill_report(self, action: str, code: str, quantity: int,
                      filled_qty: int, fills: list[Fill], order_id: int,
                      spent: float = 0.0, gained: float = 0.0,
-                     frozen: float = 0.0) -> str:
+                     frozen: float = 0.0, market: bool = False,
+                     limit_price: float | None = None) -> str:
         name = STOCK_POOL[code].name
-        lines = [f"📋 {action}委托 #{order_id}：{name}（{code}）"]
+        kind = "市价" if market else ""
+        lines = [f"📋 {kind}{action}委托 #{order_id}：{name}（{code}）"]
         if filled_qty == 0:
-            lines.append(f"未成交，{quantity} 股已挂单排队。")
+            if market and limit_price is not None:
+                lines.append(f"市价单未成交，{quantity} 股已按保护价 "
+                             f"{limit_price:.2f} 挂单排队。")
+            else:
+                lines.append(f"未成交，{quantity} 股已挂单排队。")
             if frozen > 0:
                 lines.append(f"已冻结资金 {frozen:,.2f} 元，撤单可释放。")
         else:
@@ -622,6 +675,8 @@ class TradeService:
             if filled_qty < quantity:
                 lines.append(f"剩余 {quantity - filled_qty} 股挂单中，"
                              f"/炒股 撤单 {order_id} 可撤销。")
+                if market and limit_price is not None:
+                    lines.append(f"市价单剩余按保护价 {limit_price:.2f} 排队。")
                 if frozen > 0:
                     lines.append(f"挂单部分已冻结 {frozen:,.2f} 元。")
         return "\n".join(lines)

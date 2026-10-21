@@ -1,29 +1,26 @@
-# data / runtime
+# ── 运行时数据（不随仓库分发）──
+data/
 *.db
 *.sqlite
 *.sqlite3
-data/
 *.log
 
-# python
+# ── Python ──
 __pycache__/
 *.py[cod]
 *.egg-info/
 .venv/
 venv/
 
-# dsh ledger generated artifacts (keep the ledger markdown/json under version)
-.dsh-code/*.db
-.dsh-code/.sim_test_*.db
-.dsh-code/__pycache__/
-.dsh-code/*.out
-.dsh-code/*_out*.txt
+# ── 开发/测试过程产物（仓库只放源码与文档）──
+.dsh-code/
+.agent-teams/
+preview/
+_layout_cards/
+_*.png
+*.out
 
-# agent-teams runtime state (keep nothing noisy; rc logs are volatile)
-.agent-teams/*/rc/
-.agent-teams/*/inbox/
-.agent-teams/*/mailbox.jsonl
-
-# chart outputs
-data/charts/
-_demo_*.png
+# 本地自检脚本（不属于插件运行时代码）
+/cards_check.py
+/pool_check.py
+/.txt

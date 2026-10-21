@@ -61,7 +61,7 @@ from ..config import CFG
 from ..locks import trade_lock
 from ..log import get_logger
 from ..market.stocks import (BOARD_BSE, BOARD_GEM, BOARD_MAIN, BOARD_STAR,
-                             SECTORS, STOCK_POOL, Stock)
+                             SEC_CONSUMER, SECTORS, STOCK_POOL, Stock)
 from ..storage.db import Database
 
 log = get_logger("ipo")
@@ -228,6 +228,38 @@ class IPOService:
         return True
 
     # ── 发行 ────────────────────────────────────────────────────────
+    async def cancel_user_subs(self, user_id: str) -> int:
+        """清退某用户全部在途申购：退掉 cash_frozen、删 subs 条目。
+
+        供重生（AccountService.rebirth）在 do_rebirth 之后调用：do_rebirth
+        会把 cash_frozen 置 0，若不在此退还在途申购，后续 draw 从
+        cash_frozen 递减会得到负值，被 db 的 "cash cannot be negative"
+        阻挡，整轮摇号都会失败。
+
+        只处理 state=active 的订阅（freezing/settled 由重放路径自己收尾）；
+        返回清退笔数。
+        """
+        async with trade_lock():
+            ledger = await self._load()
+            refunded = 0.0
+            dropped = 0
+            for key in [k for k, s in ledger["subs"].items()
+                        if s["user_id"] == user_id
+                        and s["state"] == "active" and s["quantity"] > 0]:
+                sub = ledger["subs"][key]
+                amount = _r2(sub["amount"])
+                if amount > 0:
+                    await self._move_cash(user_id, available=amount,
+                                          frozen=-amount)
+                refunded += amount
+                del ledger["subs"][key]
+                dropped += 1
+            if dropped:
+                await self._save(ledger)
+                log.info("清退在途申购：%s %d 笔（退回冻结 %.2f 元）",
+                         user_id, dropped, refunded)
+            return dropped
+
     async def publish(self, code: str, name: str, board: str, sector: str,
                       industry: str, issue_price: float, total_shares: int,
                       volatility: float | None = None, beta: float = 1.0,
@@ -424,6 +456,16 @@ class IPOService:
                                                   cost)
                 sub.update(state="settled", pre=None)
                 await self._save(ledger)
+            # 3b) 发行人的承销担保金：摇号完成即解冻退回可用。
+            #     与 3) 逐笔结算同级、在同一个 trade_lock 内；
+            #     用 ledger 里的 reserve_released 标志保证崩溃重入不双退。
+            if ipo.get("issuer") and ipo.get("reserve", 0) > 0 \
+                    and not ipo.get("reserve_released"):
+                await self._move_cash(ipo["issuer"],
+                                      available=ipo["reserve"],
+                                      frozen=-ipo["reserve"])
+                ipo["reserve_released"] = True
+                await self._save(ledger)
             # 4) 收尾：统计 + 登记上市 + 首日涨跌幅覆盖
             subs = self._subs_of(ledger, ipo["id"])
             subscribed = sum(s["quantity"] for s in subs)
@@ -499,35 +541,150 @@ class IPOService:
         return count
 
     async def on_day_start(self, day_key: int) -> int:
-        """每个虚拟交易日开始时调用一次（日终清算接线，t4）。
+        """每个虚拟交易日开始时调用一次（独立调用入口）。
 
         推进已上市新股的免涨跌幅天数，到期解除 Quote.pct_override、
         恢复常规涨跌幅。day_key 为单调日键（如当日零点时间戳）；同一天
         重复调用幂等。返回本次解除覆盖的股票数。
+
+        持锁入口；已在锁内（如 DayCloseService.run()）须调
+        _on_day_start_nolock——全局锁非重入，进去了就出不来。
         """
         async with trade_lock():
-            ledger = await self._load()
-            if ledger["last_limit_day"] == day_key:
-                return 0
-            cleared = 0
-            for ipo in ledger["ipos"].values():
-                if ipo["status"] != "drawn":
-                    continue
-                free_days, _ = first_day_rule(ipo["board"])
-                if ipo["days_listed"] >= free_days:
-                    continue
-                ipo["days_listed"] += 1
-                if ipo["days_listed"] >= free_days:
-                    q = (self.engine.quotes.get(ipo["code"])
-                         if self.engine else None)
-                    if q is not None:
-                        q.pct_override = None
-                    cleared += 1
-                    log.info("新股 %s %s 免涨跌幅期满，恢复常规涨跌幅",
-                             ipo["code"], ipo["name"])
-            ledger["last_limit_day"] = day_key
+            return await self._on_day_start_nolock(day_key)
+
+    async def _on_day_start_nolock(self, day_key: int) -> int:
+        """无锁变体：调用方须已持 trade_lock（日终锁内防死锁，t4 挂死根因）。"""
+        ledger = await self._load()
+        if ledger["last_limit_day"] == day_key:
+            return 0
+        cleared = 0
+        for ipo in ledger["ipos"].values():
+            if ipo["status"] != "drawn":
+                continue
+            free_days, _ = first_day_rule(ipo["board"])
+            if ipo["days_listed"] >= free_days:
+                continue
+            ipo["days_listed"] += 1
+            if ipo["days_listed"] >= free_days:
+                q = (self.engine.quotes.get(ipo["code"])
+                     if self.engine else None)
+                if q is not None:
+                    q.pct_override = None
+                cleared += 1
+                log.info("新股 %s %s 免涨跌幅期满，恢复常规涨跌幅",
+                         ipo["code"], ipo["name"])
+        ledger["last_limit_day"] = day_key
+        await self._save(ledger)
+        return cleared
+
+    # ── 玩家自发行股票（P4）─────────────────────────────────────
+    async def issue_stock(self, user_id: str, name: str, price: float,
+                          total_shares: int) -> tuple[bool, str]:
+        """玩家自发行股票：校验 → 冻结承销担保金 → 登记发行 → 即时上市。
+
+        复用现有 publish()/draw() 的发行与摇号机制，不另写随机逻辑：
+        自发行股进入与官发新股同一本账（ipo.ledger.v1），任何玩家都可用
+        `/打新 申购 <code> <签数>` 申购，抽签后即时上市并沿用首日涨跌幅
+        覆盖（market/engine.py register）。
+
+        锁边界（t1 死锁教训，全局锁非重入）：
+        - 本方法为公开入口，**自带** trade_lock；
+        - publish() 内部也持锁，所以这里不能调 publish——改为调用不持锁的
+          内部路径（见 _issue_stock_nolock）。
+        """
+        async with trade_lock():
+            return await self._issue_stock_nolock(user_id, name, price,
+                                                  total_shares)
+
+    async def _issue_stock_nolock(self, user_id: str, name: str, price: float,
+                                  total_shares: int) -> tuple[bool, str]:
+        """无锁变体：调用方须已持 trade_lock。"""
+        acc = await self.db.get_account(user_id)
+        if not acc or acc["status"] != "active":
+            return False, "只有正常状态的账户才能发行股票（破产/未开户不行）。"
+        try:
+            price = float(price)
+            total_shares = int(total_shares)
+        except (TypeError, ValueError, OverflowError):
+            return False, "发行价与发行量必须是数字。"
+        if not math.isfinite(price) or price <= 0:
+            return False, "发行价必须是有限正数。"
+        if total_shares < CFG.lot_size:
+            return False, f"发行量至少一个整手（{CFG.lot_size} 股）。"
+        name = str(name).strip()
+        if not name:
+            return False, "股票名称不能为空。"
+        # 担保金 = 发行市值 ×(1+佣金缓冲)，冻结在 issuer 的 cash_frozen
+        reserve = _r2(total_shares * price * 1.001)
+        if acc["cash_available"] < reserve:
+            return (False, f"可用资金不足：需冻结承销担保金 {reserve:,.2f} 元"
+                           f"（可用 {acc['cash_available']:,.2f} 元）。"
+                           f"降低发行量或发行价。")
+        # 发行代码：9 开头 + 6 位顺序号，避开官方 0/3/6/8 号段（每签 500）
+        ledger = await self._load()
+        taken = {i["code"] for i in ledger["ipos"].values()}
+        seq = 1
+        while True:
+            code = f"9{seq:05d}"
+            if code not in STOCK_POOL and code not in taken:
+                break
+            seq += 1
+        ipo_id = ledger["next_id"]
+        ledger["next_id"] += 1
+        lot = lot_size_of(code)
+        ledger["ipos"][str(ipo_id)] = {
+            "id": ipo_id, "code": code, "name": name, "board": BOARD_MAIN,
+            "sector": SEC_CONSUMER, "industry": "玩家发行",
+            "issue_price": _r2(price), "lot_size": lot,
+            "total_shares": total_shares, "total_lots": total_shares // lot,
+            "volatility": _DEFAULT_VOL[BOARD_MAIN], "beta": 1.0,
+            "sector_beta": 0.8, "status": "open",
+            "seed": int(zlib.crc32(code.encode())),
+            "ts": int(time.time()), "days_listed": 0, "listed": False,
+            "draw_info": None,
+            "issuer": user_id, "reserve": reserve,
+        }
+        # 担保金与发行记录必须同一事务：现金动了行没落，或行落了钱没动，
+        # 都会凭空少/多一份资产（见 margin C1 教训）。
+        async with self.db.transaction():
+            await self._move_cash(user_id, available=-reserve,
+                                  frozen=reserve)
+            await self.db.insert_player_ipo(user_id, code, name,
+                                            _r2(price), total_shares, lot)
             await self._save(ledger)
-            return cleared
+        cap = self._cap_lots(total_shares, lot)
+        log.info("玩家发行：%s %s 发行价 %.2f 量 %d 股担保金 %.2f（issuer=%s）",
+                 code, name, price, total_shares, reserve, user_id)
+        return (True, f"🆕 你发行了 {name}（{code}，主板）\n"
+                      f"发行价 {price:.2f} 元，发行量 {total_shares:,} 股，"
+                      f"每签 {lot} 股，每账户上限 {cap} 签。\n"
+                      f"已冻结承销担保金 {reserve:,.2f} 元（摇号后退回）。\n"
+                      f"发送 /打新 申购 {code} <签数> 让别人也来认购。")
+
+    async def list_my_ipos(self, user_id: str) -> str:
+        """「我的发行」面板：自己发行的股票 + 申购进度。"""
+        rows = await self.db.list_player_ipos(user_id)
+        if not rows:
+            return "你还没有发行过股票。用 /炒股 发行 <名称> <发行价> <发行股数> 试试。"
+        ledger = await self._load()
+        lines = ["📌 我的发行"]
+        for r in rows:
+            ipo = next((i for i in ledger["ipos"].values()
+                        if i["code"] == r["code"]), None)
+            extra = ""
+            if ipo is not None:
+                if ipo["status"] == "open":
+                    got = sum(s["quantity"]
+                              for s in self._subs_of(ledger, ipo["id"]))
+                    extra = f"已认购 {got:,}/{ipo['total_shares']:,} 股"
+                elif ipo["status"] == "drawn":
+                    info = ipo.get("draw_info") or {}
+                    extra = (f"已摇号，中签 {info.get('winning_lots', 0)} 签"
+                             f"（{info.get('allotted_shares', 0):,} 股）")
+                extra += f"，发行价 {ipo['issue_price']:.2f} 元"
+            lines.append(f"· {r['name']}（{r['code']}）{extra}")
+        return "\n".join(lines)
 
     # ── 查询/播报 ──────────────────────────────────────────────────
     async def status_text(self, user_id: str | None = None) -> str:

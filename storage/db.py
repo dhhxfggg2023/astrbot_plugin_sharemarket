@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import math
+import os
 import sqlite3
+import time
 from contextlib import asynccontextmanager
 
 import aiosqlite
@@ -99,6 +102,43 @@ CREATE TABLE IF NOT EXISTS news (
     impact REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_news_ts ON news(ts);
+
+CREATE TABLE IF NOT EXISTS watchlist (
+    user_id TEXT NOT NULL,
+    code TEXT NOT NULL,
+    created_ts INTEGER NOT NULL,
+    PRIMARY KEY (user_id, code)
+);
+CREATE INDEX IF NOT EXISTS idx_watchlist_user ON watchlist(user_id);
+
+CREATE TABLE IF NOT EXISTS leaderboard_snapshots (
+    day_ts INTEGER NOT NULL,        -- 当日零点时间戳（与 DayCloseService._day_seq 对齐的单调日键）
+    rank INTEGER NOT NULL,
+    user_id TEXT NOT NULL,
+    user_name TEXT NOT NULL,
+    total REAL NOT NULL,            -- 当日总资产（可用+持仓市值，不含 withdrawable）
+    cash REAL NOT NULL,             -- 当日可用资金快照
+    mv REAL NOT NULL,               -- 当日持仓市值
+    return_pct REAL NOT NULL,       -- 相对 initial_cash 的收益率 %
+    status TEXT NOT NULL,           -- active / bankrupt
+    rebirth_count INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (day_ts, rank)
+);
+CREATE INDEX IF NOT EXISTS idx_lbsnap_day ON leaderboard_snapshots(day_ts);
+
+CREATE TABLE IF NOT EXISTS player_ipos (
+    issuer TEXT NOT NULL,             -- 发行发起人 user_id
+    code TEXT NOT NULL,
+    name TEXT NOT NULL,
+    price REAL NOT NULL,              -- 发行价（>0 有限实数）
+    total_shares INTEGER NOT NULL,    -- 发行总股数（>0）
+    lot_size INTEGER NOT NULL DEFAULT 100,
+    status TEXT NOT NULL DEFAULT 'draft',   -- draft / listed / delisted
+    created_ts INTEGER NOT NULL,
+    PRIMARY KEY (issuer, code)
+);
+CREATE INDEX IF NOT EXISTS idx_player_ipo_issuer ON player_ipos(issuer);
+CREATE INDEX IF NOT EXISTS idx_player_ipo_code ON player_ipos(code);
 """
 
 # 已存在的旧库升级（新库 SCHEMA 已含这些列，ALTER 会报 duplicate column，忽略）
@@ -114,6 +154,7 @@ class Database:
         self.path = path
         self.conn: aiosqlite.Connection | None = None
         self._in_txn = False
+        self._backup_day: str | None = None   # 已成功备份的自然日（进程内缓存）
 
     async def open(self) -> None:
         self.conn = await aiosqlite.connect(self.path)
@@ -221,8 +262,23 @@ class Database:
             "status IN ('open','partial')", (user_id,))
         await self._commit()
 
-    async def list_accounts(self):
-        cur = await self.conn.execute("SELECT * FROM accounts")
+    async def list_accounts(self, is_npc: bool | None = None):
+        """列出全部账户。
+
+        is_npc 参数（P4 模拟股民警隔离，hang_analyst 核实结论）：
+        - True  → 只返回 user_id 以 `npc:` 开头的 NPC 账户；
+        - False → 只返回真实玩家账户（排行榜/统计口径用这个）；
+        - None  → 全部（仅内部全表扫描用）。
+        NPC 账户必须隔离在 accounts 表的统计口径之外，否则会污染
+        开户数、破产统计与收益率榜。
+        """
+        if is_npc is True:
+            sql = "SELECT * FROM accounts WHERE user_id LIKE 'npc:%'"
+        elif is_npc is False:
+            sql = "SELECT * FROM accounts WHERE user_id NOT LIKE 'npc:%'"
+        else:
+            sql = "SELECT * FROM accounts"
+        cur = await self.conn.execute(sql)
         return await cur.fetchall()
 
     async def settle_withdrawable(self) -> None:
@@ -368,24 +424,29 @@ class Database:
         return await cur.fetchall()
 
     async def stats(self) -> dict:
-        """运行统计（心跳 / 状态指令用）。用列别名取值，兼容不同驱动。"""
+        """运行统计（心跳 / 状态指令用）。用列别名取值，兼容不同驱动。
+
+        NPC 账户（user_id 以 `npc:` 开头）不计入 accounts/active/bankrupt
+        —— 那是模拟股民警的虚拟账户，混进统计会虚增开户数与破产数。
+        """
         async def one(sql: str) -> int:
             cur = await self.conn.execute(sql)
             row = await cur.fetchone()
             return int(row["n"]) if row else 0
 
+        npc_filter = "WHERE user_id NOT LIKE 'npc:%'"
         return {
-            "accounts": await one("SELECT COUNT(*) AS n FROM accounts"),
+            "accounts": await one(f"SELECT COUNT(*) AS n FROM accounts {npc_filter}"),
             "active": await one(
-                "SELECT COUNT(*) AS n FROM accounts WHERE status='active'"),
+                f"SELECT COUNT(*) AS n FROM accounts {npc_filter} AND status='active'"),
             "bankrupt": await one(
-                "SELECT COUNT(*) AS n FROM accounts WHERE status='bankrupt'"),
+                f"SELECT COUNT(*) AS n FROM accounts {npc_filter} AND status='bankrupt'"),
             "positions": await one("SELECT COUNT(*) AS n FROM positions"),
             "open_orders": await one(
                 "SELECT COUNT(*) AS n FROM orders WHERE status IN ('open','partial')"),
             "trades": await one("SELECT COUNT(*) AS n FROM trades"),
             "frozen_total": await one(
-                "SELECT COALESCE(SUM(cash_frozen),0) AS n FROM accounts"),
+                f"SELECT COALESCE(SUM(cash_frozen),0) AS n FROM accounts {npc_filter}"),
         }
 
     # ── K 线 ──────────────────────────────────────────────
@@ -434,4 +495,152 @@ class Database:
             "INSERT INTO meta(key,value) VALUES(?,?) "
             "ON CONFLICT(key) DO UPDATE SET value=?",
             (key, value, value))
+        await self._commit()
+
+    # ── 每日自动备份（DESIGN.md §16）────────────────────────
+    def backup_path(self) -> str:
+        """备份文件路径：<库路径>.bak（sharemarket.db → sharemarket.db.bak）。"""
+        return self.path + ".bak"
+
+    async def backup(self) -> str:
+        """把当前库一致性快照写到 <path>.bak，返回备份路径。
+
+        VACUUM INTO 生成一致性快照（含未落盘数据的已提交状态）到 .bak.tmp，
+        再 os.replace 原子替换 .bak：中途失败时旧 .bak 仍然可用，不会留下
+        半截备份。VACUUM INTO 要求目标文件不存在，故先清残留 tmp。
+        不能在 transaction() 内调用（VACUUM 不能跑在事务里）。
+        """
+        target = self.backup_path()
+        tmp = target + ".tmp"
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        await self.conn.execute("VACUUM INTO ?", (tmp,))
+        os.replace(tmp, target)
+        return target
+
+    async def maybe_daily_backup(self) -> bool:
+        """每日自动备份入口：每个自然日第一次调用执行备份，同日重复 no-op。
+
+        _backup_day 是进程内缓存，把每 tick 一次的调用挡成纯字符串比较；
+        跨重启判重靠 meta['backup_last_date']（今天已备过则只补缓存）。
+        失败不写缓存也不写 meta，下次调用自动重试（失败日志去重由调用方负责）。
+        """
+        today = time.strftime("%Y-%m-%d")
+        if self._backup_day == today:
+            return False
+        if await self.get_meta("backup_last_date") == today:
+            self._backup_day = today
+            return False
+        await self.backup()
+        await self.set_meta("backup_last_date", today)
+        self._backup_day = today
+        return True
+
+    # ── 自选股 ──────────────────────────────────────────────
+    async def watchlist_add(self, user_id: str, code: str, ts: int) -> None:
+        await self.conn.execute(
+            "INSERT OR IGNORE INTO watchlist(user_id,code,created_ts) "
+            "VALUES(?,?,?)",
+            (user_id, code, ts))
+        await self._commit()
+
+    async def watchlist_remove(self, user_id: str, code: str) -> None:
+        await self.conn.execute(
+            "DELETE FROM watchlist WHERE user_id=? AND code=?",
+            (user_id, code))
+        await self._commit()
+
+    async def watchlist_list(self, user_id: str) -> list[dict]:
+        cur = await self.conn.execute(
+            "SELECT * FROM watchlist WHERE user_id=? ORDER BY created_ts",
+            (user_id,))
+        rows = await cur.fetchall()
+        # 离线测试的 shim 返回 dict 子类（见 .dsh-code/sim_test.py:32）；
+        # 真实 aiosqlite 返回 sqlite3.Row，dict(row) 同样适用。
+        return [dict(r) for r in rows]
+
+    async def watchlist_contains(self, user_id: str, code: str) -> bool:
+        cur = await self.conn.execute(
+            "SELECT 1 FROM watchlist WHERE user_id=? AND code=?",
+            (user_id, code))
+        return await cur.fetchone() is not None
+
+    # ── 排行榜快照 ──────────────────────────────────────────
+    async def insert_leaderboard_snapshot(self, day_ts: int, rank: int,
+                                         user_id: str, user_name: str,
+                                         total: float, cash: float, mv: float,
+                                         return_pct: float, status: str,
+                                         rebirth_count: int) -> None:
+        """一日一行（幂等：同日同 rank 重跑覆盖，不重复记）。
+
+        rank 是当日名次，与 (day_ts, rank) 一起构成主键。
+        """
+        await self.conn.execute(
+            "INSERT OR REPLACE INTO leaderboard_snapshots"
+            "(day_ts,rank,user_id,user_name,total,cash,mv,return_pct,"
+            "status,rebirth_count) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (day_ts, rank, user_id, user_name, round(total, 2), round(cash, 2),
+             round(mv, 2), round(return_pct, 4), status, int(rebirth_count)))
+        await self._commit()
+
+    async def list_leaderboard_snapshots(self, limit_days: int = 14) -> list[dict]:
+        """最近 limit_days 个交易日的全部快照（按 day_ts DESC, rank）。"""
+        cur = await self.conn.execute(
+            "SELECT * FROM leaderboard_snapshots "
+            "WHERE day_ts IN (SELECT DISTINCT day_ts FROM leaderboard_snapshots "
+            "ORDER BY day_ts DESC LIMIT ?) ORDER BY day_ts DESC, rank",
+            (limit_days,))
+        rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+    async def latest_snapshot_day(self) -> int | None:
+        cur = await self.conn.execute(
+            "SELECT MAX(day_ts) AS m FROM leaderboard_snapshots")
+        row = await cur.fetchone()
+        return row["m"] if row else None
+
+    # ── 玩家自发行股票 ──────────────────────────────────────
+    async def insert_player_ipo(self, issuer: str, code: str, name: str,
+                                price: float, total_shares: int,
+                                lot_size: int = 100) -> None:
+        """登记一笔玩家自发行（幂等：同 issuer+code 覆盖）。
+
+        C2 防线：price/total_shares 必须为有限正数（NaN 的 <=0 比较为
+        False，会穿过朴素的负值检查，故先过 isfinite）。
+        """
+        price = float(price)
+        total_shares = int(total_shares)
+        lot_size = int(lot_size)
+        if not math.isfinite(price) or price <= 0:
+            raise ValueError("player ipo price must be a positive number")
+        if not math.isfinite(float(total_shares)) or total_shares <= 0:
+            raise ValueError("player ipo total_shares must be a positive integer")
+        if lot_size <= 0:
+            raise ValueError("player ipo lot_size must be positive")
+        await self.conn.execute(
+            "INSERT OR REPLACE INTO player_ipos"
+            "(issuer,code,name,price,total_shares,lot_size,created_ts) "
+            "VALUES(?,?,?,?,?,?,?)",
+            (issuer, code, name, round(price, 2), total_shares, lot_size,
+             int(time.time())))
+        await self._commit()
+
+    async def get_player_ipo(self, issuer: str, code: str) -> dict | None:
+        cur = await self.conn.execute(
+            "SELECT * FROM player_ipos WHERE issuer=? AND code=?", (issuer, code))
+        row = await cur.fetchone()
+        return dict(row) if row else None
+
+    async def list_player_ipos(self, issuer: str) -> list[dict]:
+        cur = await self.conn.execute(
+            "SELECT * FROM player_ipos WHERE issuer=? "
+            "ORDER BY created_ts DESC, code", (issuer,))
+        rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+    async def update_player_ipo_status(self, issuer: str, code: str,
+                                       status: str) -> None:
+        await self.conn.execute(
+            "UPDATE player_ipos SET status=? WHERE issuer=? AND code=?",
+            (status, issuer, code))
         await self._commit()

@@ -23,8 +23,10 @@ def min_order_amount(price: float) -> float:
 
 
 class AccountService:
-    def __init__(self, db: Database):
+    def __init__(self, db: Database, margin=None, ipo=None):
         self.db = db
+        self.margin = margin  # MarginService（可选；重生前查未清负债）
+        self.ipo = ipo        # IPOService（可选；重生前清退在途申购）
 
     async def open_account(self, user_id: str, user_name: str) -> tuple[bool, str]:
         existing = await self.db.get_account(user_id)
@@ -97,8 +99,20 @@ class AccountService:
         if remain > 0:
             h, m = divmod(remain // 60, 60)
             return False, f"重生冷却中，还需等待 {h} 小时 {m} 分。"
+        # 有未清融资融券负债时拒绝重生：否则 do_rebirth 不触碰 margin 账本，
+        # open loan 会被重置为无主负债，而净资产按重生本金计 → 凭空减值。
+        if self.margin is not None and await self.margin.has_debt(user_id):
+            return False, ("你还有融资融券负债未清，无法重生。"
+                          "请先 /炒股 还钱 / 还券 结清。")
         cash = CFG.initial_cash * CFG.rebirth_cash_factor
         await self.db.do_rebirth(user_id, cash, now)
+        # 同事务清退在途打新申购：否则 do_rebirth 把 cash_frozen 置 0，
+        # 之后 draw 时从 cash_frozen 递减会得到负值，阻断整轮摇号。
+        if self.ipo is not None:
+            dropped = await self.ipo.cancel_user_subs(user_id)
+            if dropped:
+                log.info("重生 %s 同时清退 %d 笔在途申购（冻结资金已退回）",
+                         user_id, dropped)
         left = CFG.rebirth_max_times - acc["rebirth_count"] - 1
         log.info("重生 %s 第 %d 次，资金 %.2f，剩余次数 %d",
                  user_id, acc["rebirth_count"] + 1, cash, left)

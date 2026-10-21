@@ -12,6 +12,10 @@
     ret = beta·dM + sector_beta·dSec + idio(肥尾) + 主力效应 + 跳空 + 弱均值回归 + 供需冲击
 所有"日口径"波动率按 k = 1/√(每虚拟日 tick 数) 折算；持续性因子的累积因子
 必须用 n/(1-φ)² − 2φ(1-φⁿ)/(1-φ)³（见 `_factor_sigmas`）。
+
+涨停板状态机（DESIGN §2 炸板/开板）：
+    正常 →（触板）封板 →（放量/利空耗尽封单）炸板 →（回封）封板 …
+封板期间价格钉在涨停价，封单强度被成交量与卖压消耗；耗尽即炸板回落。
 """
 
 from __future__ import annotations
@@ -36,6 +40,14 @@ FACTOR_NOISE_SHARE = 0.35        # 因子中"当日独立噪声"占比
 ANCHOR_ALPHA = 0.0001            # 锚（慢速 EMA）更新速度
 AMBIENT_VOLUME = 0.4             # 每 tick 基础成交量 = CFG.mm_depth × 该系数
 
+# ── 涨停板状态机（DESIGN §2：炸板/开板）──────────────────────
+BOARD_NORMAL = "正常"            # 未触板
+BOARD_SEALED = "封板"            # 涨停封板：价格钉在涨停价，买单只能排队
+BOARD_BROKEN = "炸板"            # 触板后打开：当日曾涨停后回落（直至日终）
+SEAL_STRENGTH = (0.02, 0.10)     # 封板初始强度区间（可吸收的累计下行收益率）
+SEAL_VOL_ATTACK = 0.0006         # 每 1 倍环境成交量对封单的消耗（放量破板）
+BREAK_GAP = (0.004, 0.018)       # 炸板瞬间回落幅度区间（占涨停价比例）
+
 # 虚拟主力：状态 → (每 tick 收益效应, 成交量倍数)
 # 效应刻意小于板块因子：主力制造的是"个股行情"，不该盖过板块联动
 MF_EFFECT = {"观望": 0.0, "吸筹": 0.0002, "拉升": 0.0004,
@@ -59,6 +71,26 @@ class MainForce:
     state: str = "观望"
     ticks_left: int = 0
     net_inflow: float = 0.0      # 当日净流入（元，正=净买）
+
+
+@dataclass
+class LimitBoard:
+    """涨停板状态机（DESIGN §2 炸板/开板）：正常 → 封板 → 炸板 → 回封 …
+
+    strength：封单剩余强度（可吸收的累计下行收益率）。封板期间每个 tick
+    被成交量（放量攻击）与负收益（卖压）消耗，耗尽即炸板回落。
+    状态是日内现象：日终/停牌/除权时 reset。
+    """
+    state: str = BOARD_NORMAL
+    strength: float = 0.0
+    sealed_ticks: int = 0        # 本轮封板累计 tick 数
+    break_count: int = 0         # 当日炸板次数
+
+    def reset(self) -> None:
+        self.state = BOARD_NORMAL
+        self.strength = 0.0
+        self.sealed_ticks = 0
+        self.break_count = 0
 
 
 @dataclass
@@ -115,6 +147,7 @@ class PriceEngine:
         self._jump = 0.0               # 大盘跳空冲击（衰减中）
         self._senti = 0.0              # 情绪原始值（-1..1）
         self.main_force: dict[str, MainForce] = {}
+        self.boards: dict[str, LimitBoard] = {}          # 涨停板状态机
         self.suspended: dict[str, int] = {}        # code -> 剩余停牌 tick 数
         self.resume_gaps: dict[str, float] = {}    # code -> 复牌跳空幅度（一次性）
         self.st_flag: dict[str, bool] = {c: s.is_st for c, s in STOCK_POOL.items()}
@@ -139,6 +172,7 @@ class PriceEngine:
             self._raw[s.code] = p
             self.main_force[s.code] = MainForce(
                 ticks_left=self.rng.randint(*MF_DURATION["观望"]))
+            self.boards[s.code] = LimitBoard()
 
     # ── 尺度 ─────────────────────────────────────────────
     @property
@@ -233,6 +267,15 @@ class PriceEngine:
         mf = self.main_force.get(code)
         return mf.state if mf else "观望"
 
+    def board_state(self, code: str) -> str:
+        """涨停板状态（正常/封板/炸板，DESIGN §2 炸板/开板）。"""
+        lb = self.boards.get(code)
+        return lb.state if lb else BOARD_NORMAL
+
+    def is_sealed(self, code: str) -> bool:
+        """涨停封板中：价格钉在涨停价，买单只能排队等待。"""
+        return self.board_state(code) == BOARD_SEALED
+
     # ── 主力状态机 ───────────────────────────────────────
     def _mf_advance(self, mf: MainForce) -> None:
         transitions = MF_TRANS.get(mf.state, [])
@@ -248,6 +291,34 @@ class PriceEngine:
             log.debug("主力状态 %s → %s", mf.state, nxt)
         mf.state = nxt
         mf.ticks_left = self.rng.randint(*MF_DURATION.get(nxt, (30, 200)))
+
+    # ── 涨停板状态机 ─────────────────────────────────────
+    def _seal_board(self, code: str, lb: LimitBoard, s: Stock,
+                    lu: float) -> None:
+        """触板进入封板：价格自此钉在涨停价，封单按强度被消耗。"""
+        lb.state = BOARD_SEALED
+        lb.strength = self.rng.uniform(*SEAL_STRENGTH)
+        lb.sealed_ticks = 0
+        log.info("涨停封板：%s %s %.2f（封单强度 %.3f）",
+                 s.name, code, lu, lb.strength)
+
+    def _break_board(self, code: str, lb: LimitBoard, s: Stock,
+                     gap: float, reason: str) -> None:
+        """炸板：释放钉板，价格自涨停价回落 gap 比例（DESIGN §2）。"""
+        q = self.quotes[code]
+        lu = q.limit_up(s)
+        raw = min(max(lu * (1.0 - gap), q.limit_down(s)), lu)
+        self._raw[code] = raw
+        p = max(round(raw, 2), CFG.price_tick)
+        if p < q.price:
+            q.low = min(q.low, p)
+            q.price = p
+        self.decomp["impact"] -= gap      # 回落计入供需冲击分量
+        lb.state = BOARD_BROKEN
+        lb.break_count += 1
+        log.warning("炸板：%s %s %s → %.2f（-%.2f%%，封板 %d tick，当日第 %d 次）",
+                    s.name, code, reason, p, gap * 100, lb.sealed_ticks,
+                    lb.break_count)
 
     # ── 推进 ─────────────────────────────────────────────
     def tick(self, pressures: dict[str, int] | None = None) -> None:
@@ -302,6 +373,11 @@ class PriceEngine:
             if self.is_suspended(code) or code in self.delisted:
                 continue          # 停牌/退市：不产生价格与成交量
             s = STOCK_POOL[code]
+            lb = self.boards.setdefault(code, LimitBoard())
+            lu = q.limit_up(s)
+            # 涨停板状态机：触板即封（含恢复行情已在涨停价）
+            if lb.state != BOARD_SEALED and round(self._raw[code], 2) >= lu:
+                self._seal_board(code, lb, s, lu)
             idio = s.volatility * CFG.idio_scale * k * self._fat_z()
             drift = -CFG.mean_revert * math.log(self._raw[code] / self.anchor[code])
             impact = CFG.impact_k * (pressures.get(code, 0) / max(CFG.mm_depth, 1))
@@ -339,7 +415,9 @@ class PriceEngine:
             # 内部按全精度累积，展示价才取整到 0.01——否则低价股（1.8 元）
             # 每 tick 的理论波动不足一个最小变动单位，会被取整悄悄抹平
             raw = self._raw[code] * (1 + ret)
-            raw = min(max(raw, q.limit_down(s)), q.limit_up(s))
+            raw = min(max(raw, q.limit_down(s)), lu)
+            if lb.state == BOARD_SEALED:
+                raw = lu          # 封单托板：吸收本 tick 波动，价格钉在涨停价
             self._raw[code] = raw
             new_price = max(round(raw, 2), CFG.price_tick)
 
@@ -347,6 +425,10 @@ class PriceEngine:
                 q.high = max(q.high, new_price)
                 q.low = min(q.low, new_price)
                 q.price = new_price
+
+            # 同 tick 内触板/回封：价格到涨停价即封（与 tick 开头的检查幂等）
+            if lb.state != BOARD_SEALED and q.price >= lu:
+                self._seal_board(code, lb, s, lu)
 
             # 锚（很慢的 EMA）跟随价格
             self.anchor[code] += ANCHOR_ALPHA * (q.price - self.anchor[code])
@@ -360,6 +442,15 @@ class PriceEngine:
             if flow_dir:
                 # 主力主动成交约占环境量的一成
                 mf.net_inflow += flow_dir * q.price * tick_volume * 0.1
+
+            # 封单消耗：成交量（放量）与卖压共同攻击封单，耗尽即炸板
+            if lb.state == BOARD_SEALED:
+                lb.sealed_ticks += 1
+                lb.strength -= (SEAL_VOL_ATTACK * tick_volume / max(base_vol, 1.0)
+                                + max(0.0, -ret))
+                if lb.strength <= 0.0:
+                    self._break_board(code, lb, s, self.rng.uniform(*BREAK_GAP),
+                                       "放量打开")
 
             self._append_bar(code, q, tick_volume)
 
@@ -422,6 +513,9 @@ class PriceEngine:
             return False
         self.suspended[code] = max(int(ticks), 1)
         self.resume_gaps[code] = resume_gap
+        lb = self.boards.get(code)
+        if lb:
+            lb.reset()              # 封板状态不跨停牌
         log.info("停牌：%s %s（%d tick，%s，复牌跳空 %+.2f%%）",
                  STOCK_POOL[code].name, code, self.suspended[code], reason,
                  resume_gap * 100)
@@ -454,6 +548,9 @@ class PriceEngine:
         """退市整理：停止交易并从行情中移除该标的。"""
         self.delisted.add(code)
         self.suspended.pop(code, None)
+        lb = self.boards.get(code)
+        if lb:
+            lb.reset()
         log.warning("退市：%s %s 终止上市", STOCK_POOL[code].name, code)
 
     def apply_shock(self, pct: float, code: str | None = None,
@@ -464,6 +561,16 @@ class PriceEngine:
             if not q or code in self.delisted:
                 return
             s = STOCK_POOL[code]
+            lb = self.boards.get(code)
+            if lb is not None and lb.state == BOARD_SEALED:
+                # 封板中：利好加固封单；利空先由封单吸收，击穿才炸板
+                lb.strength += pct
+                if pct < 0 and lb.strength <= 0.0:
+                    self._break_board(code, lb, s, -pct, "利空击穿")
+                elif pct < 0:
+                    log.info("封板吸收：%s %s 利空 %.2f%%（封单余 %.3f）",
+                             s.name, code, pct * 100, lb.strength)
+                return
             raw = self._raw[code] * (1 + pct)
             raw = min(max(raw, q.limit_down(s)), q.limit_up(s))
             self._raw[code] = raw
@@ -498,6 +605,9 @@ class PriceEngine:
         new = max(round(new, 2), CFG.price_tick)
         q.price = new
         self._raw[code] = new
+        lb = self.boards.get(code)
+        if lb:
+            lb.reset()              # 基准价修正打破封板上下文
         log.info("除权除息：%s %s → %.2f（%s）", s.name, code, new,
                  f"绝对额 {delta:+.2f}" if delta is not None
                  else f"比例 ×{factor:.4f}")
@@ -540,6 +650,9 @@ class PriceEngine:
             mf = self.main_force.get(code)
             if mf:
                 mf.net_inflow = 0.0
+            lb = self.boards.get(code)
+            if lb:
+                lb.reset()          # 涨停状态是日内现象，新交易日重新计
         self._bar_tick = 0
         self._bar_roll = False
         self._bar_seq += 1
@@ -558,6 +671,7 @@ class PriceEngine:
                 r["high"], r["low"], r["volume"])
             self.anchor[r["code"]] = r["price"]
             self._raw[r["code"]] = r["price"]
+            self.boards.setdefault(r["code"], LimitBoard())
 
     # ── 新股上市登记（IPO 模块公开入口，P2）─────────────────
     def register(self, stock: Stock, price: float | None = None) -> bool:
@@ -572,6 +686,7 @@ class PriceEngine:
         if stock.code not in self.main_force:
             self.main_force[stock.code] = MainForce(
                 ticks_left=self.rng.randint(*MF_DURATION["观望"]))
+        self.boards.setdefault(stock.code, LimitBoard())
         if stock.code in self.quotes:
             return False
         p = price if price is not None else stock.initial_price

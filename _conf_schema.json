@@ -1,0 +1,380 @@
+{
+  "initial_cash": {
+    "description": "新开户赠送的初始资金（元）。",
+    "type": "float",
+    "default": 1000000.0,
+    "label": "初始资金"
+  },
+  "currency": {
+    "description": "金额单位展示后缀。",
+    "type": "string",
+    "default": "元",
+    "label": "货币单位"
+  },
+  "lot_size": {
+    "description": "一手等于多少股（A股为 100）。",
+    "type": "int",
+    "default": 100,
+    "label": "每手股数"
+  },
+  "price_tick": {
+    "description": "最小价格变动单位（元）。",
+    "type": "float",
+    "default": 0.01,
+    "label": "最小价格单位"
+  },
+  "limit_main": {
+    "description": "主板股票相对昨收的日涨跌幅上限比例。",
+    "type": "float",
+    "default": 0.1,
+    "label": "主板涨跌幅"
+  },
+  "limit_growth": {
+    "description": "创业板/科创板涨跌幅上限比例。",
+    "type": "float",
+    "default": 0.2,
+    "label": "创业科创涨跌幅"
+  },
+  "limit_bse": {
+    "description": "北交所股票涨跌幅上限比例。",
+    "type": "float",
+    "default": 0.3,
+    "label": "北交所涨跌幅"
+  },
+  "limit_st": {
+    "description": "ST 股涨跌幅上限比例（更严）。",
+    "type": "float",
+    "default": 0.05,
+    "label": "ST 涨跌幅"
+  },
+  "commission_rate": {
+    "description": "佣金费率，买卖双向收取。",
+    "type": "float",
+    "default": 0.00025,
+    "label": "佣金费率"
+  },
+  "commission_min": {
+    "description": "每笔委托的最低佣金（元）。",
+    "type": "float",
+    "default": 5.0,
+    "label": "最低佣金"
+  },
+  "stamp_tax_rate": {
+    "description": "印花税率，只在卖出时收取。",
+    "type": "float",
+    "default": 0.0005,
+    "label": "印花税率"
+  },
+  "transfer_fee_rate": {
+    "description": "过户费率，买卖双向收取。",
+    "type": "float",
+    "default": 1e-5,
+    "label": "过户费率"
+  },
+  "tick_seconds": {
+    "description": "行情每隔多少秒推进一次。",
+    "type": "float",
+    "default": 3.0,
+    "label": "行情推进间隔"
+  },
+  "market_mode": {
+    "description": "247 = 常开 demonstrative 市场；realtime = 跟随真实时段。",
+    "type": "string",
+    "default": "247",
+    "label": "市场模式"
+  },
+  "day_seconds": {
+    "description": "247 模式下每个虚拟交易日的长度（秒）。",
+    "type": "int",
+    "default": 1200,
+    "label": "虚拟交易日长度"
+  },
+  "mm_spread": {
+    "description": "做市商基础买卖价差比率。",
+    "type": "float",
+    "default": 0.002,
+    "label": "做市商价差"
+  },
+  "mm_depth": {
+    "description": "做市商每档挂出的委托数量（股）。",
+    "type": "int",
+    "default": 5000,
+    "label": "做市商深度"
+  },
+  "impact_k": {
+    "description": "供需冲击系数，净买压越强价格漂移越大。",
+    "type": "float",
+    "default": 0.05,
+    "label": "冲击系数"
+  },
+  "bars_per_day": {
+    "description": "每个虚拟交易日生成多少根 K 线。",
+    "type": "int",
+    "default": 240,
+    "label": "每日 K 线数"
+  },
+  "bars_keep": {
+    "description": "内存中保留的 K 线根数。",
+    "type": "int",
+    "default": 240,
+    "label": "K 线保留数"
+  },
+  "rebirth_cooldown_hours": {
+    "description": "破产后多久可以重生（小时）。",
+    "type": "int",
+    "default": 24,
+    "label": "重生冷却小时"
+  },
+  "rebirth_cash_factor": {
+    "description": "重生时发放资金相对初始资金的比例。",
+    "type": "float",
+    "default": 0.5,
+    "label": "重生资金比例"
+  },
+  "rebirth_max_times": {
+    "description": "一生最多重生几次。",
+    "type": "int",
+    "default": 3,
+    "label": "重生于上限"
+  },
+  "trade_cooldown_seconds": {
+    "description": "同一玩家两次交易指令之间的最小间隔（秒）。",
+    "type": "float",
+    "default": 5.0,
+    "label": "交易冷却"
+  },
+  "vol_scale": {
+    "description": "全局波动放大系数，越大市场越波动。",
+    "type": "float",
+    "default": 1.15,
+    "label": "全局波动系数"
+  },
+  "idio_scale": {
+    "description": "个股特质波动系数。",
+    "type": "float",
+    "default": 1.0,
+    "label": "个股波动系数"
+  },
+  "fat_tail_dof": {
+    "description": "个股冲击分布的自由度，越小肥尾越明显。",
+    "type": "int",
+    "default": 3,
+    "label": "肥尾自由度"
+  },
+  "crash_prob": {
+    "description": "每 tick 触发大盘暴跌的概率。",
+    "type": "float",
+    "default": 0.0002,
+    "label": "暴跌概率"
+  },
+  "crash_size": {
+    "description": "大盘暴跌幅度区间，格式为逗号分隔的两个小数，如 0.010,0.025。",
+    "type": "string",
+    "default": "0.010,0.025",
+    "label": "暴跌幅度"
+  },
+  "melt_prob": {
+    "description": "每 tick 触发大盘暴涨的概率。",
+    "type": "float",
+    "default": 0.00015,
+    "label": "暴涨概率"
+  },
+  "melt_size": {
+    "description": "大盘暴涨幅度区间，格式为逗号分隔的两个小数，如 0.008,0.020。",
+    "type": "string",
+    "default": "0.008,0.020",
+    "label": "暴涨幅度"
+  },
+  "jump_decay": {
+    "description": "跳空冲击每 tick 的衰减比例。",
+    "type": "float",
+    "default": 0.6,
+    "label": "跳空衰减"
+  },
+  "stock_jump_prob": {
+    "description": "单只股票每 tick 暴雷/暴涨的概率。",
+    "type": "float",
+    "default": 3e-5,
+    "label": "个股跳空概率"
+  },
+  "stock_jump_neg": {
+    "description": "个股暴雷幅度区间，格式为逗号分隔的两个小数，如 0.05,0.10。",
+    "type": "string",
+    "default": "0.05,0.10",
+    "label": "个股暴雷幅度"
+  },
+  "stock_jump_pos": {
+    "description": "个股暴涨幅度区间，格式为逗号分隔的两个小数，如 0.035,0.08。",
+    "type": "string",
+    "default": "0.035,0.08",
+    "label": "个股暴涨幅度"
+  },
+  "mean_revert": {
+    "description": "均值回归强度，越低价格越接近随机游走。",
+    "type": "float",
+    "default": 5e-5,
+    "label": "均值回归强度"
+  },
+  "sentiment_feedback": {
+    "description": "情绪指数对大盘的反作用强度。",
+    "type": "float",
+    "default": 8e-5,
+    "label": "情绪反作用强度"
+  },
+  "main_force_enabled": {
+    "description": "是否启用虚拟主力行为。",
+    "type": "bool",
+    "default": true,
+    "label": "虚拟主力"
+  },
+  "auction_enabled": {
+    "description": "是否启用开盘/收盘集合竞价阶段。",
+    "type": "bool",
+    "default": true,
+    "label": "启用集合竞价"
+  },
+  "auction_seconds": {
+    "description": "开盘集合竞价时长（秒）。",
+    "type": "int",
+    "default": 60,
+    "label": "开盘竞价时长"
+  },
+  "closing_auction_seconds": {
+    "description": "收盘集合竞价时长（秒）。",
+    "type": "int",
+    "default": 45,
+    "label": "收盘竞价时长"
+  },
+  "auction_cancel_ratio": {
+    "description": "竞价前段允许撤单的比例。",
+    "type": "float",
+    "default": 0.5,
+    "label": "竞价撤单比例"
+  },
+  "news_market_prob": {
+    "description": "每 tick 发布大盘新闻的概率。",
+    "type": "float",
+    "default": 0.0004,
+    "label": "大盘新闻概率"
+  },
+  "news_sector_prob": {
+    "description": "每 tick 发布板块新闻的概率。",
+    "type": "float",
+    "default": 0.0008,
+    "label": "板块新闻概率"
+  },
+  "news_stock_prob": {
+    "description": "每 tick 发布个股新闻的概率。",
+    "type": "float",
+    "default": 0.0025,
+    "label": "个股新闻概率"
+  },
+  "news_max_per_day": {
+    "description": "每个虚拟交易日最多发布多少条新闻。",
+    "type": "int",
+    "default": 40,
+    "label": "每日新闻上限"
+  },
+  "dividend_prob": {
+    "description": "每只股票每天发生分红/送转的概率。",
+    "type": "float",
+    "default": 0.02,
+    "label": "分红概率"
+  },
+  "suspend_prob": {
+    "description": "每只股票每天被停牌的概率。",
+    "type": "float",
+    "default": 0.004,
+    "label": "停牌概率"
+  },
+  "suspend_ticks": {
+    "description": "停牌持续时间区间（tick），格式为逗号分隔的两个整数，如 60,300。",
+    "type": "string",
+    "default": "60,300",
+    "label": "停牌时长"
+  },
+  "st_prob": {
+    "description": "弱势股每天被 ST 的概率。",
+    "type": "float",
+    "default": 0.01,
+    "label": "ST 概率"
+  },
+  "un_st_prob": {
+    "description": "ST 股每天摘帽的概率。",
+    "type": "float",
+    "default": 0.02,
+    "label": "摘帽概率"
+  },
+  "delist_price": {
+    "description": "面值退市的股价阈值（元）。",
+    "type": "float",
+    "default": 1.0,
+    "label": "退市价阈值"
+  },
+  "delist_prob": {
+    "description": "已 ST 且低于面值时每天退市的概率。",
+    "type": "float",
+    "default": 0.05,
+    "label": "退市概率"
+  },
+  "log_level": {
+    "description": "日志级别，可选 DEBUG / INFO / WARNING / ERROR。",
+    "type": "string",
+    "default": "INFO",
+    "label": "日志级别"
+  },
+  "log_trades": {
+    "description": "是否记录每一笔成交的日志与流水。",
+    "type": "bool",
+    "default": true,
+    "label": "记录成交日志"
+  },
+  "heartbeat_ticks": {
+    "description": "每隔多少个 tick 输出一条心跳日志。",
+    "type": "int",
+    "default": 200,
+    "label": "心跳间隔"
+  },
+  "npc_active": {
+    "description": "是否开启模拟股民警（NPC），开启后每个行情 tick 会由 NPC 自动下单。",
+    "type": "bool",
+    "default": true,
+    "label": "模拟股民警开关"
+  },
+  "npc_count": {
+    "description": "模拟股民警的账户数量（user_id 以 npc: 开头，不计入玩家排行榜）。",
+    "type": "int",
+    "default": 8,
+    "label": "NPC 账户数"
+  },
+  "npc_initial_cash": {
+    "description": "每个 NPC 初始资金（元）。",
+    "type": "float",
+    "default": 500000.0,
+    "label": "NPC 初始资金"
+  },
+  "npc_momentum": {
+    "description": "NPC 跟势概率（按涨跌幅选方向），否则随机下单。",
+    "type": "float",
+    "default": 0.5,
+    "label": "NPC 跟势概率"
+  },
+  "npc_max_lots": {
+    "description": "NPC 每次下单的最大手数（股数 = 手数 × 每手股数）。",
+    "type": "int",
+    "default": 3,
+    "label": "NPC 每次最大手数"
+  },
+  "market_paused": {
+    "description": "暂停行情推进：开启后价格不再变化，挂单、撤单与日终清算仍照常执行。改完重载插件生效。",
+    "type": "bool",
+    "default": false,
+    "label": "暂停行情"
+  },
+  "notice": {
+    "description": "置顶公告：填写后显示在 /炒股 行情 的卡片顶部与文本第一行，留空则不显示（最多 200 字）。",
+    "type": "string",
+    "default": "",
+    "label": "置顶公告"
+  }
+}

@@ -62,6 +62,41 @@ def boll(closes: list[float], n: int = 20,
     return mid, mid + k * sd, mid - k * sd
 
 
+def kdj(highs: list[float], lows: list[float], closes: list[float],
+        n: int = 9) -> tuple[float | None, float | None, float | None]:
+    """KDJ(9,3,3)：返回 (K, D, J)；样本不足或序列长度不一致返回 (None,None,None)。"""
+    if n <= 0 or len(closes) < n or len(highs) != len(closes) \
+            or len(lows) != len(closes):
+        return None, None, None
+    k = d = 50.0
+    for i in range(n - 1, len(closes)):
+        hh = max(highs[i - n + 1:i + 1])
+        ll = min(lows[i - n + 1:i + 1])
+        # 窗口走平（HHV==LLV）时 RSV 无定义，取中性 50 避免除零
+        rsv = 50.0 if hh <= ll else (closes[i] - ll) / (hh - ll) * 100.0
+        k = k * 2.0 / 3.0 + rsv / 3.0
+        d = d * 2.0 / 3.0 + k / 3.0
+    return k, d, 3.0 * k - 2.0 * d
+
+
+def volume_ratio(volumes: list[float], n: int = 5) -> float | None:
+    """量比：最近一期成交量 ÷ 之前 n 期平均成交量；样本不足返回 None。"""
+    if n <= 0 or len(volumes) < n + 1:
+        return None
+    avg = sum(volumes[-n - 1:-1]) / n
+    if avg <= 0:
+        return None
+    return volumes[-1] / avg
+
+
+def turnover_rate(volume: float, float_shares: float) -> float | None:
+    """换手率（%）= 成交量 ÷ 流通股本 × 100；股本或成交量无效返回 None。"""
+    if volume is None or float_shares is None \
+            or volume < 0 or float_shares <= 0:
+        return None
+    return volume / float_shares * 100.0
+
+
 def sparkline(values: list[float]) -> str:
     """把序列画成一行方块走势（QQ 里不需要图片）。"""
     if not values:

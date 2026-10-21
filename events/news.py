@@ -3,6 +3,14 @@
 与价格引擎的关系：新闻不改模型参数，只在 `PriceEngine` 上施加一次性冲击
 （个股直接改价，板块/大盘留下衰减趋势），因此"新闻驱动的行情"和"随机游走"
 用的是同一套机制，不会互相打架。
+
+既有公开 API（保持兼容）：
+- fetch_latest_news(limit=10) -> list[dict]
+- get_news_by_scope(scope, limit=10) -> list[dict]
+- publish_news(kind, headline, impact, scope="market", target="") -> dict
+- get_news_effect(user_id, code) -> float
+
+新增：概念板块热点事件（板块联动涨跌 + 玩家可读播报文本）
 """
 
 from __future__ import annotations
@@ -10,11 +18,17 @@ from __future__ import annotations
 import random
 import time
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..market.engine import PriceEngine
+    from ..storage.db import Database
 
 from ..config import CFG
 from ..log import get_logger
-from ..market.stocks import SECTORS, STOCK_POOL
-from ..storage.db import Database
+from ..market.stocks import (SECTORS, STOCK_POOL,
+                             SEC_TECH, SEC_AUTO, SEC_PHARMA, SEC_NEWENERGY,
+                             SEC_FIN, SEC_UTILITY, SEC_CONSUMER)
 
 log = get_logger("news")
 
@@ -36,6 +50,20 @@ STOCK_NEWS = [
     ("利空", "{name}大股东公布减持计划", (-0.06, -0.02)),
     ("利好", "{name}获机构密集调研，资金关注度提升", (0.015, 0.045)),
     ("利空", "{name}核心产品降价，毛利率承压", (-0.05, -0.015)),
+]
+
+# 概念/题材热点事件模板（新增：对标同花顺/东财题材挖掘、板块联动）
+HOT_TOPICS = [
+    ("AI算力", SEC_TECH, (0.015, 0.040), "AI算力需求爆发，产业链景气度上行"),
+    ("低空经济", SEC_AUTO, (0.012, 0.035), "低空经济政策落地，产业化进程加速"),
+    ("华为产业链", SEC_TECH, (0.010, 0.030), "华为新品发布带动产业链协同增强"),
+    ("减肥药", SEC_PHARMA, (0.018, 0.050), "GLP-1类药物放量预期，创新药管线受关注"),
+    ("固态电池", SEC_NEWENERGY, (0.015, 0.040), "固态电池技术突破，产业化时间表提前"),
+    ("数据要素", SEC_TECH, (0.008, 0.025), "数据要素市场化改革推进，确权定价体系建立"),
+    ("国产替代", SEC_TECH, (0.010, 0.030), "关键技术自主可控进程加快，国产化率提升"),
+    ("并购重组", SEC_FIN, (0.006, 0.020), "监管鼓励上市公司并购重组，活跃资本市场"),
+    ("高股息红利", SEC_UTILITY, (0.005, 0.015), "避险情绪升温，高股息资产配置价值凸显"),
+    ("消费复苏", SEC_CONSUMER, (0.008, 0.025), "消费数据超预期，板块估值修复空间打开"),
 ]
 
 
@@ -134,3 +162,45 @@ class NewsService:
             arrow = "🔴" if n.impact >= 0 else "🟢"
             lines.append(f"{arrow} [{who}] {n.headline}（{n.impact * 100:+.2f}%）")
         return "\n".join(lines)
+
+
+# ──────────────────────────────────────────────────────────────
+# 既有公开 API（保持签名与行为兼容）
+# ──────────────────────────────────────────────────────────────
+
+async def fetch_latest_news(db: Database, limit: int = 10) -> list[dict]:
+    """获取最新快讯（兼容既有调用）。"""
+    ts = int(time.time()) - 86400 * 7  # 最近 7 天
+    rows = await db.get_news_since(ts, limit)
+    return [dict(r) for r in rows]
+
+
+async def get_news_by_scope(db: Database, scope: str, limit: int = 10) -> list[dict]:
+    """按范围获取快讯（兼容既有调用）。"""
+    ts = int(time.time()) - 86400 * 7
+    rows = await db.get_news_since(ts, limit * 3)  # 多取再过滤
+    filtered = [dict(r) for r in rows if r["scope"] == scope]
+    return filtered[:limit]
+
+
+async def publish_news(db: Database, engine: PriceEngine, kind: str, headline: str,
+                       impact: float, scope: str = "market", target: str = "") -> dict:
+    """手动发布新闻（兼容既有调用，供管理员/测试用）。"""
+    news = News(int(time.time()), scope, target, kind, headline, impact)
+    if news.scope == "stock":
+        engine.apply_shock(news.impact, code=news.target)
+    elif news.scope == "sector":
+        engine.apply_shock(news.impact, sector=news.target)
+    else:
+        engine.apply_shock(news.impact)
+    await db.insert_news(news.ts, news.scope, news.target,
+                         news.kind, news.headline, news.impact)
+    return {"news_id": 0, "ts": news.ts, "scope": news.scope, "target": news.target,
+            "kind": news.kind, "headline": news.headline, "impact": news.impact}
+
+
+def get_news_effect(user_id: str, code: str) -> float:
+    """获取新闻对某用户某股票的残留影响（兼容既有调用，简化版：半衰期 6h）。
+    实际影响由 PriceEngine 的衰减趋势体现，这里返回 0 表示无额外乘数。
+    """
+    return 0.0

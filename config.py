@@ -42,6 +42,10 @@ class Config:
     # ── 治理 ─────────────────────────────────────────────
     trade_cooldown_seconds: float = 5.0    # D10 每玩家交易指令限流
 
+    # ── 运维开关（全部在 WebUI「插件设置」里改，聊天里没有管理员指令）──
+    market_paused: bool = False            # 暂停行情推进（挂单/撤单/日终清算照常）
+    notice: str = ""                       # 行情卡片置顶公告，留空不显示（≤200 字）
+
     # ── 凶险度（E1：让市场像真实股市一样凶险，且大体不可预测）──────
     vol_scale: float = 1.15             # 全局波动放大系数（乘在大盘/板块因子上）
     idio_scale: float = 1.0             # 个股特质波动系数
@@ -81,6 +85,16 @@ class Config:
     log_level: str = "INFO"                # DEBUG / INFO / WARNING / ERROR
     log_trades: bool = True                # 每笔成交写一行日志 + 落库（成交流水表）
     heartbeat_ticks: int = 200             # 每 N 个 tick 打一条心跳日志
+
+    # ── 模拟股民警（P4 NPC 交易者）─────────────────────────
+    npc_active: bool = True                # 预留开关（常开语义下默认 True，不再提供指令切换）
+    npc_count: int = 8                     # NPC 账户数（user_id 前缀 npc:）
+    npc_initial_cash: float = 500_000.0    # 每个 NPC 的初始资金
+    npc_momentum: float = 0.5              # 跟势概率（否则随机方向）
+    npc_max_lots: int = 3                  # 每次最多下几手
+
+    # ── 排行榜（P0 + t1 全体榜）────────────────────────────
+    rank_all_limit: int = 10               # 全体榜（include_npc=True）默认条目数
 
 
 CFG = Config()
