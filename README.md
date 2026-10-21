@@ -300,4 +300,4 @@ $env:PYTHONIOENCODING="utf-8"; python .dsh-code/doc_check.py
 
 ## 许可
 
-[MIT](LICENSE) © 2026 dhhxfggg
+[MIT](LICENSE) © 2026 dhhxfggg2023

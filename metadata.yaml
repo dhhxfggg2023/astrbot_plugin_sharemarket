@@ -6,8 +6,8 @@ desc: |
   佣金/印花税/过户费、做市商撮合、供需反向影响价格、排行榜、破产与重生。
   所有指令以 /炒股 开头。纯虚拟，无真实资金。
 version: 0.2.0
-author: dhhxfggg
-repo: https://github.com/dhhxfggg/astrbot_plugin_sharemarket
+author: dhhxfggg2023
+repo: https://github.com/dhhxfggg2023/astrbot_plugin_sharemarket
 astrbot_version: ">=4.9.2"
 support_platforms:
   - qq_official
